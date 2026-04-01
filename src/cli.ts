@@ -6,6 +6,117 @@ import { DEFAULT_GATEWAY_PORT, DEFAULT_RELAY_PORT, OFFICIAL_RELAY_URL, MODEL_MAP
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { styleText } from 'node:util';
+import { stdout as output } from 'node:process';
+
+// ============== CLI Utilities ==============
+
+// Check if we should use colors (NO_COLOR support)
+function shouldUseColors(): boolean {
+  if (process.env['NO_COLOR'] !== undefined) return false;
+  if (process.env['FORCE_COLOR'] !== undefined) return true;
+  return output.isTTY ?? false;
+}
+
+// Color helper - only apply colors if enabled
+function color(text: string, colorName: string): string {
+  if (!shouldUseColors()) return text;
+  try {
+    return styleText(colorName, text);
+  } catch {
+    return text;
+  }
+}
+
+const colors = {
+  success: (t: string) => color(t, 'green'),
+  error: (t: string) => color(t, 'red'),
+  warning: (t: string) => color(t, 'yellow'),
+  info: (t: string) => color(t, 'cyan'),
+  dim: (t: string) => color(t, 'gray'),
+  bold: (t: string) => color(t, 'bold'),
+};
+
+// Simple spinner for loading animations
+class Spinner {
+  private frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  private interval: NodeJS.Timeout | null = null;
+  private message: string;
+  private frameIndex = 0;
+
+  constructor(message: string) {
+    this.message = message;
+  }
+
+  start(): void {
+    if (!output.isTTY || !shouldUseColors()) {
+      output.write(`${this.message}...\n`);
+      return;
+    }
+    output.write(`${this.frames[0]} ${this.message}`);
+    this.interval = setInterval(() => {
+      this.frameIndex = (this.frameIndex + 1) % this.frames.length;
+      output.write(`\r${this.frames[this.frameIndex]} ${this.message}`);
+    }, 80);
+  }
+
+  stop(finalMessage?: string, success: boolean = true): void {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+    if (output.isTTY && shouldUseColors()) {
+      output.write('\r');
+      output.write(' '.repeat(this.message.length + 10));
+      output.write('\r');
+    }
+    const icon = success ? colors.success('✓') : colors.error('✗');
+    const msg = finalMessage ?? this.message;
+    output.write(`${icon} ${msg}\n`);
+  }
+
+  update(message: string): void {
+    this.message = message;
+    if (output.isTTY && shouldUseColors() && this.interval) {
+      output.write(`\r${this.frames[this.frameIndex]} ${message}`);
+    }
+  }
+}
+
+// Table formatter for status output
+function formatTable(rows: string[][], headers?: string[]): string {
+  if (rows.length === 0) return '';
+  
+  // Calculate column widths
+  const allRows = headers ? [headers, ...rows] : rows;
+  const colWidths = allRows.reduce((widths, row) => {
+    row.forEach((cell, i) => {
+      // Strip ANSI codes for width calculation
+      const cleanCell = cell.replace(/\x1b\[[0-9;]*m/g, '');
+      widths[i] = Math.max(widths[i] || 0, cleanCell.length);
+    });
+    return widths;
+  }, [] as number[]);
+
+  // Format rows
+  const formatRow = (row: string[]): string => {
+    return row.map((cell, i) => {
+      const cleanCell = cell.replace(/\x1b\[[0-9;]*m/g, '');
+      const padding = ' '.repeat((colWidths[i] || 0) - cleanCell.length);
+      return cell + padding;
+    }).join('  ');
+  };
+
+  let result = '';
+  if (headers) {
+    result += formatRow(headers) + '\n';
+    result += colors.dim('─'.repeat(colWidths.reduce((a, b) => a + b + 2, -2))) + '\n';
+  }
+  result += rows.map(formatRow).join('\n');
+  return result;
+}
+
+// ============== Core Functions ==============
 
 function getVeilHome(): string {
   return process.env['VEIL_HOME'] ?? join(process.env['HOME'] ?? '.', '.veil');
@@ -28,21 +139,37 @@ async function cmdInit(): Promise<void> {
   const force = process.argv.includes('--force');
 
   if (existsSync(join(home, 'wallet.json')) && !force) {
-    console.error('Already initialized. Use --force to reinitialize.');
+    console.error(colors.error('Already initialized. Use --force to reinitialize.'));
     process.exit(1);
   }
 
+  output.write(colors.info('Initializing Veil wallet...\n\n'));
+
   const password = await promptPassword('Password (min 8 chars): ');
 
+  const spinner = new Spinner('Generating wallet');
+  spinner.start();
+
   try {
+    await new Promise(resolve => setTimeout(resolve, 500)); // Minimum spinner display
     const info = await createWallet(password, home);
     const pk = info.signingPublicKey;
-    console.log(`Veil initialized.`);
-    console.log(`Public key: ${pk.slice(0, 8)}...${pk.slice(-8)}`);
-    console.log(`Gateway:    http://localhost:${DEFAULT_GATEWAY_PORT}/v1`);
-    console.log(`Relay:      ${OFFICIAL_RELAY_URL}`);
+    
+    spinner.stop('Wallet generated', true);
+    
+    output.write('\n');
+    output.write(colors.success('✓ Veil initialized successfully!\n\n'));
+    output.write(colors.dim('Configuration:\n'));
+    output.write(`  ${colors.bold('Public key:')}  ${colors.info(pk.slice(0, 8) + '...' + pk.slice(-8))}\n`);
+    output.write(`  ${colors.bold('Gateway:')}     ${colors.info(`http://localhost:${DEFAULT_GATEWAY_PORT}/v1`)}\n`);
+    output.write(`  ${colors.bold('Relay:')}       ${colors.info(OFFICIAL_RELAY_URL)}\n`);
+    output.write('\n');
+    output.write(colors.dim('Next steps:\n'));
+    output.write(`  1. Run ${colors.info('veil status')} to check connection\n`);
+    output.write(`  2. Run ${colors.info('veil provide init')} to configure as provider\n`);
   } catch (err) {
-    console.error((err as Error).message);
+    spinner.stop('Failed to create wallet', false);
+    console.error(colors.error((err as Error).message));
     process.exit(1);
   }
 }
@@ -51,11 +178,16 @@ async function cmdProvideInit(): Promise<void> {
   const home = getVeilHome();
 
   if (!existsSync(join(home, 'wallet.json'))) {
-    console.error("Run 'veil init' first.");
+    console.error(colors.error("Run 'veil init' first."));
     process.exit(1);
   }
 
+  output.write(colors.info('Configuring Veil Provider...\n\n'));
+
   const apiKeyInput = await promptPassword('Anthropic API key: ');
+
+  const spinner = new Spinner('Validating API key');
+  spinner.start();
 
   // Validate API key
   try {
@@ -63,20 +195,25 @@ async function cmdProvideInit(): Promise<void> {
       headers: { 'x-api-key': apiKeyInput, 'anthropic-version': '2023-06-01' },
     });
     if (res.status === 401) {
-      console.error('Invalid API key.');
+      spinner.stop('Invalid API key', false);
       process.exit(1);
     }
+    spinner.stop('API key validated', true);
   } catch {
-    console.error('Cannot reach Anthropic API. Check network.');
+    spinner.stop('Cannot reach Anthropic API', false);
+    console.error(colors.error('Check network connection.'));
     process.exit(1);
   }
 
   const password = await promptPassword('Wallet password: ');
+  
+  spinner.start('Verifying wallet');
   // Verify password by loading wallet
   try {
     await loadWallet(password, home);
+    spinner.stop('Wallet verified', true);
   } catch {
-    console.error('Wrong password.');
+    spinner.stop('Wrong password', false);
     process.exit(1);
   }
 
@@ -93,20 +230,27 @@ async function cmdProvideInit(): Promise<void> {
 
   writeFileSync(join(home, 'provider.json'), JSON.stringify(providerConfig, null, 2), { mode: 0o600 });
 
-  console.log('Provider initialized.');
-  console.log(`Models: ${models.join(', ')}`);
-  console.log('Max concurrent: 5');
+  output.write('\n');
+  output.write(colors.success('✓ Provider initialized!\n\n'));
+  output.write(colors.dim('Configuration:\n'));
+  output.write(`  ${colors.bold('Models:')}         ${colors.info(models.join(', '))}\n`);
+  output.write(`  ${colors.bold('Max concurrent:')} ${colors.info('5')}\n`);
+  output.write(`  ${colors.bold('Priority:')}       ${colors.info('Self (highest)')}\n`);
 }
 
 async function cmdProvideStart(): Promise<void> {
   const home = getVeilHome();
   const password = await promptPassword('Wallet password: ');
 
+  const spinner = new Spinner('Loading wallet');
+  spinner.start();
+
   const wallet = await loadWallet(password, home);
+  spinner.stop('Wallet loaded', true);
 
   const providerPath = join(home, 'provider.json');
   if (!existsSync(providerPath)) {
-    console.error("Run 'veil provide init' first.");
+    console.error(colors.error("Run 'veil provide init' first."));
     process.exit(1);
   }
 
@@ -136,28 +280,35 @@ async function cmdProvideStart(): Promise<void> {
   }
 
   if (apiKeys.length === 0) {
-    console.error('No API keys available.');
+    console.error(colors.error('No API keys available.'));
     process.exit(1);
   }
 
   const relayUrl = config.relay_url ?? OFFICIAL_RELAY_URL;
+  
+  spinner.start('Connecting to relay');
   const provider = await startProvider({
     wallet,
     relayUrl,
     apiKeys,
     maxConcurrent: providerConfig.max_concurrent ?? 5,
-    proxyUrl: process.env.PROXY_URL,        // e.g. http://127.0.0.1:4000
-    proxySecret: process.env.PROXY_SECRET,  // shared secret from proxy
+    proxyUrl: process.env.PROXY_URL,
+    proxySecret: process.env.PROXY_SECRET,
   });
+  spinner.stop('Connected to relay', true);
 
-  console.log('Provider online.');
-  console.log(`Models: ${providerConfig.models.join(', ')}`);
-  console.log(`Relay:  ${relayUrl}`);
-  console.log('Waiting for requests...');
+  output.write('\n');
+  output.write(colors.success('✓ Provider online!\n\n'));
+  output.write(colors.dim('Status:\n'));
+  output.write(`  ${colors.bold('Models:')}     ${colors.info(providerConfig.models.join(', '))}\n`);
+  output.write(`  ${colors.bold('Relay:')}      ${colors.info(relayUrl)}\n`);
+  output.write(`  ${colors.bold('Status:')}     ${colors.success('Waiting for requests...')}\n`);
 
   process.on('SIGINT', async () => {
-    console.log('\nShutting down...');
+    output.write('\n');
+    output.write(colors.warning('Shutting down provider...\n'));
     await provider.close();
+    output.write(colors.success('Provider stopped.\n'));
     process.exit(0);
   });
   process.on('SIGTERM', async () => {
@@ -169,7 +320,11 @@ async function cmdProvideStart(): Promise<void> {
 async function cmdRelayStart(): Promise<void> {
   const home = getVeilHome();
   const password = await promptPassword('Wallet password: ');
+  
+  const spinner = new Spinner('Loading wallet');
+  spinner.start();
   const wallet = await loadWallet(password, home);
+  spinner.stop('Wallet loaded', true);
 
   const portArg = process.argv.indexOf('--port');
   const port = portArg !== -1 ? Number(process.argv[portArg + 1]) : Number(process.env['VEIL_RELAY_PORT'] ?? DEFAULT_RELAY_PORT);
@@ -179,13 +334,17 @@ async function cmdRelayStart(): Promise<void> {
 
   const relay = await startRelay({ port, wallet, dbPath });
 
-  console.log('Relay online.');
-  console.log(`Listening: ws://0.0.0.0:${port}`);
-  console.log('Providers: 0 connected');
+  output.write('\n');
+  output.write(colors.success('✓ Relay online!\n\n'));
+  output.write(colors.dim('Listening:\n'));
+  output.write(`  ${colors.bold('WebSocket:')}  ${colors.info(`ws://0.0.0.0:${port}`)}\n`);
+  output.write(`  ${colors.bold('Providers:')}  ${colors.success('0 connected')}\n`);
 
   process.on('SIGINT', async () => {
-    console.log('\nShutting down...');
+    output.write('\n');
+    output.write(colors.warning('Shutting down relay...\n'));
     await relay.close();
+    output.write(colors.success('Relay stopped.\n'));
     process.exit(0);
   });
   process.on('SIGTERM', async () => {
@@ -199,24 +358,32 @@ async function cmdStatus(): Promise<void> {
   const configPath = join(home, 'config.json');
 
   if (!existsSync(configPath)) {
-    console.error("Not initialized. Run 'veil init'.");
+    console.error(colors.error("Not initialized. Run 'veil init'."));
     process.exit(1);
   }
+
+  const spinner = new Spinner('Checking status');
+  spinner.start();
 
   const config = JSON.parse(readFileSync(configPath, 'utf-8'));
   const pk = config.consumer_pubkey;
 
   // Check gateway
   let gatewayStatus = 'stopped';
+  let gatewayColor = colors.error;
   try {
     const res = await fetch(`http://localhost:${config.gateway_port}/health`, {
       signal: AbortSignal.timeout(2000),
     });
-    if (res.ok) gatewayStatus = 'running';
+    if (res.ok) {
+      gatewayStatus = 'running';
+      gatewayColor = colors.success;
+    }
   } catch { /* stopped */ }
 
   // Check relay
   let relayStatus = 'unreachable';
+  let relayColor = colors.error;
   try {
     const { WebSocket } = await import('ws');
     await new Promise<void>((resolve, reject) => {
@@ -226,6 +393,7 @@ async function cmdStatus(): Promise<void> {
         clearTimeout(timer);
         ws.close();
         relayStatus = 'connected';
+        relayColor = colors.success;
         resolve();
       });
       ws.on('error', () => { clearTimeout(timer); reject(new Error('error')); });
@@ -235,13 +403,25 @@ async function cmdStatus(): Promise<void> {
   // Check provider
   const providerPath = join(home, 'provider.json');
   const providerStatus = existsSync(providerPath) ? 'configured' : 'not configured';
+  const providerColor = existsSync(providerPath) ? colors.success : colors.warning;
 
-  console.log('Veil Status');
-  console.log('-----------');
-  console.log(`Public key:   ${pk.slice(0, 8)}...${pk.slice(-8)}`);
-  console.log(`Gateway:      http://localhost:${config.gateway_port} [${gatewayStatus}]`);
-  console.log(`Relay:        ${config.relay_url} [${relayStatus}]`);
-  console.log(`Provider:     [${providerStatus}]`);
+  spinner.stop('Status check complete', true);
+
+  output.write('\n');
+  output.write(colors.bold('Veil Status\n'));
+  output.write(colors.dim('─'.repeat(50)) + '\n');
+
+  // Use table format
+  const rows = [
+    [colors.bold('Component'), colors.bold('Status'), colors.bold('Details')],
+    ['Public Key', colors.info(pk.slice(0, 8) + '...' + pk.slice(-8)), ''],
+    ['Gateway', gatewayColor(gatewayStatus), `http://localhost:${config.gateway_port}`],
+    ['Relay', relayColor(relayStatus), config.relay_url],
+    ['Provider', providerColor(providerStatus), providerPath],
+  ];
+
+  output.write(formatTable(rows.slice(1), rows[0]) + '\n');
+  output.write('\n');
 }
 
 async function main(): Promise<void> {
@@ -271,14 +451,14 @@ async function main(): Promise<void> {
       await cmdStatus();
       break;
     default:
-      console.log('Usage: veil <command>');
-      console.log('');
-      console.log('Commands:');
-      console.log('  init            Initialize Veil wallet');
-      console.log('  provide init    Configure as Provider');
-      console.log('  provide start   Start Provider');
-      console.log('  relay start     Start Relay server');
-      console.log('  status          Check status');
+      output.write(colors.bold('Veil - Decentralized AI Inference Protocol\n\n'));
+      output.write(colors.dim('Usage: veil <command>\n\n'));
+      output.write(colors.bold('Commands:\n'));
+      output.write(`  ${colors.info('init')}            Initialize Veil wallet\n`);
+      output.write(`  ${colors.info('provide init')}    Configure as Provider\n`);
+      output.write(`  ${colors.info('provide start')}   Start Provider\n`);
+      output.write(`  ${colors.info('relay start')}     Start Relay server\n`);
+      output.write(`  ${colors.info('status')}          Check status\n`);
       break;
   }
 }

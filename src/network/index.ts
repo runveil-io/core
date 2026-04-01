@@ -1,6 +1,9 @@
 import WebSocket, { WebSocketServer } from 'ws';
 import type { IncomingMessage } from 'node:http';
 import type { WsMessage } from '../types.js';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('network');
 import {
   PING_INTERVAL_MS,
   PONG_TIMEOUT_MS,
@@ -86,7 +89,7 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
       if (ws.readyState === WebSocket.OPEN) {
         ws.ping();
         pongTimeout = setTimeout(() => {
-          console.log(JSON.stringify({ level: 'warn', msg: 'pong_timeout', url }));
+          log.warn('pong_timeout', { url });
           ws.terminate();
         }, PONG_TIMEOUT_MS);
       }
@@ -113,7 +116,7 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
           const msg: WsMessage = JSON.parse(data.toString());
           onMessage(msg);
         } catch {
-          console.log(JSON.stringify({ level: 'error', msg: 'invalid_ws_message' }));
+          log.error('invalid_ws_message');
         }
       });
 

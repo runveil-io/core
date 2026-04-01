@@ -1,5 +1,8 @@
 import type { Connection } from '../network/index.js';
 import { createServer } from '../network/index.js';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('relay');
 import { initDatabase } from '../db.js';
 import { verify, sign, sha256, toHex, fromHex } from '../crypto/index.js';
 import { MAX_REQUEST_AGE_MS } from '../config/bootstrap.js';
@@ -32,7 +35,7 @@ export function verifyRequest(
 ): boolean {
   const now = Date.now();
   if (Math.abs(now - timestamp) > MAX_REQUEST_AGE_MS) {
-    console.log(JSON.stringify({ level: 'debug', msg: 'verify_fail_timestamp', now, timestamp, diff: Math.abs(now - timestamp) }));
+    log.debug('verify_fail_timestamp', { now, timestamp, diff: Math.abs(now - timestamp) });
     return false;
   }
 
@@ -54,7 +57,7 @@ export function verifyRequest(
     fromHex(outer.consumer_pubkey),
   );
   if (!result) {
-    console.log(JSON.stringify({ level: 'debug', msg: 'verify_fail_signature', consumer: outer.consumer_pubkey.slice(0, 16) }));
+    log.debug('verify_fail_signature', { consumer: outer.consumer_pubkey.slice(0, 16) });
   }
   return result;
 }
@@ -191,7 +194,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
       timestamp: Date.now(),
     });
 
-    console.log(JSON.stringify({ level: 'info', msg: 'provider_registered', id: payload.provider_pubkey.slice(0, 16) }));
+    log.info('provider_registered', { id: payload.provider_pubkey.slice(0, 16) });
   }
 
   function handleConsumerRequest(conn: Connection, msg: WsMessage): void {
@@ -246,7 +249,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
     provider.conn.send(forwardMsg);
    } catch (err: any) {
-    console.log(JSON.stringify({ level: 'error', msg: 'consumer_request_error', error: err.message, stack: err.stack?.split('\n').slice(0, 3) }));
+    log.error('consumer_request_error', { error: err.message });
     const requestId = msg.request_id;
     if (requestId) {
       conn.send({ type: 'error', request_id: requestId, payload: { code: 'api_error', message: err.message }, timestamp: Date.now() });
@@ -317,7 +320,8 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
       conn.ws.on('message', (data) => {
         try {
-          const msg: WsMessage = JSON.parse(data.toString()); console.log(JSON.stringify({level:"debug",msg:"relay_recv",type:msg.type,req_id:msg.request_id?.slice(0,8)}));
+          const msg: WsMessage = JSON.parse(data.toString());
+          log.debug('relay_recv', { type: msg.type, req_id: msg.request_id?.slice(0, 8) });
 
           switch (msg.type) {
             case 'provider_hello':
@@ -350,7 +354,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
               break;
           }
         } catch {
-          console.log(JSON.stringify({ level: 'error', msg: 'relay_message_parse_error' }));
+          log.error('relay_message_parse_error');
         }
       });
 
@@ -358,13 +362,13 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
         if (isProvider && providerId) {
           providers.delete(providerId);
           try { removeProvider.run(providerId); } catch { /* db may be closed */ }
-          console.log(JSON.stringify({ level: 'info', msg: 'provider_disconnected', id: providerId.slice(0, 16) }));
+          log.info('provider_disconnected', { id: providerId.slice(0, 16) });
         }
       });
     },
   });
 
-  console.log(JSON.stringify({ level: 'info', msg: 'relay_started', port: server.port }));
+  log.info('relay_started', { port: server.port });
 
   return {
     async close(): Promise<void> {

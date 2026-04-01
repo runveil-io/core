@@ -1,5 +1,8 @@
-import { Hono } from 'hono';
+﻿import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('consumer');
 import { nanoid } from 'nanoid';
 import { connect } from '../network/index.js';
 import { seal, open, sign, sha256, toHex, fromHex } from '../crypto/index.js';
@@ -103,10 +106,10 @@ export async function startGateway(options: GatewayOptions): Promise<{
         },
         onClose() {
           relayConnected = false;
-          console.log(JSON.stringify({ level: 'warn', msg: 'relay_disconnected' }));
+          log.warn('relay_disconnected');
         },
         onError(err) {
-          console.log(JSON.stringify({ level: 'error', msg: 'relay_error', error: err.message }));
+          log.error('relay_error', { error: err.message });
         },
         reconnect: true,
       });
@@ -120,7 +123,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
         timestamp: Date.now(),
       });
     } catch (err) {
-      console.log(JSON.stringify({ level: 'error', msg: 'relay_connect_failed', error: (err as Error).message }));
+      log.error('relay_connect_failed', { error: (err as Error).message });
     }
   }
 
@@ -447,3 +450,4 @@ export async function startGateway(options: GatewayOptions): Promise<{
     port,
   };
 }
+

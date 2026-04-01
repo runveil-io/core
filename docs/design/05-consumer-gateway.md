@@ -6,6 +6,24 @@
 > Depends on: 04-crypto-envelope, 00-architecture-review-v0.2
 > Source: `src/consumer/index.ts` (423行), `src/consumer/anthropic-stream.ts` (37行)
 
+## 0. 关键设计决策
+
+**Veil Consumer网关起在 localhost:4000，完全兼容 litellm 协议。**
+
+OpenClaw已有litellm provider支持（默认localhost:4000），自带failover机制。
+用户只需：
+```bash
+# 安装Veil Consumer（起在:4000）
+npx veil init && veil start
+
+# OpenClaw加一个litellm profile
+openclaw onboard --auth-choice litellm-api-key --litellm-api-key dummy
+```
+
+之后：直连打满 → 429 → OpenClaw自动failover到litellm(Veil) → 用户无感。
+
+——
+
 ## 1. 职责边界
 
 ### 做什么

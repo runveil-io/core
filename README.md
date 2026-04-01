@@ -13,6 +13,23 @@ $ clawd build           # Contribute code, earn future revenue
 
 ---
 
+## Why Veil?
+
+**Your API quota ran out mid-task?** Switch to Veil. Use someone else's idle capacity. Keep working.
+
+```
+Direct:  Your App → Your API Key → Anthropic (quota exceeded ❌)
+Veil:    Your App → localhost:4000 → Relay → Provider's API → Anthropic ✅
+```
+
+Veil runs as a local gateway on port 4000. Your tools (Cursor, OpenClaw, any OpenAI-compatible client) don't know the difference. You pay per token with crypto — cheaper than buying another subscription.
+
+**Your subscription is idle 90% of the time?** Share it. Earn USDC while you sleep.
+
+**You need AI but don't want an account?** Veil is anonymous. No KYC. No tracking. The relay sees who sent a request but can't read it. The provider processes the request but doesn't know who sent it.
+
+---
+
 ## What is Veil?
 
 Veil is a decentralized network for AI inference. Three roles:
@@ -215,3 +232,17 @@ MIT
 ---
 
 **[runveil.io](https://runveil.io)** · [@runveil_io](https://x.com/runveil_io) · [Telegram](https://t.me/+XJ-ogZ9hBy44ZmFl)
+
+## Contributors
+
+Thanks to everyone building Veil.
+
+| Contributor | PRs | Points | Contributions |
+|-------------|-----|--------|---------------|
+| [@sami-openlife](https://github.com/sami-openlife) | #15, #16 | 4,500 | Config validation, Structured logging |
+| [@597226617](https://github.com/597226617) | #11 | 2,500 | CLI colors & spinner |
+| [@hopkdj](https://github.com/hopkdj) | #12 | 1,500 | Provider health endpoint |
+| [@Chronolapse411](https://github.com/Chronolapse411) | #14 | *under review* | Multi-provider selector |
+
+*Points include 5x Genesis Bonus (early contributor multiplier).*
+*Points convert to TOKEN at TGE.*
