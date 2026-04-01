@@ -6,6 +6,7 @@ const log = createLogger('provider');
 import { MODEL_MAP, RETRY_CONFIG } from '../config/bootstrap.js';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
+import { MetricsStore } from './metrics.js';
 import type { Connection } from '../network/index.js';
 import type { Wallet } from '../wallet/index.js';
 import type {
@@ -213,6 +214,7 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
   const apiBase = proxyUrl ?? undefined;
 
   let activeRequests = 0;
+  const metrics = new MetricsStore();
 
   const conn = await connect({
     url: relayUrl,
@@ -271,6 +273,10 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
   });
 
   async function handleIncomingRequest(msg: WsMessage): Promise<void> {
+    const requestStart = Date.now();
+    let isError = false;
+    let modelName = 'unknown';
+
     activeRequests++;
     const requestId = msg.request_id!;
     try {
@@ -292,6 +298,7 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
       // Extract consumer encryption pubkey for response encryption
       const consumerEncPubkey = innerBytes.slice(0, 32);
       const inner: InnerPlaintext = JSON.parse(new TextDecoder().decode(plaintext));
+      modelName = inner.model || 'unknown';
 
       if (inner.stream) {
         // Streaming mode
@@ -381,6 +388,7 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
         });
       }
     } catch (err) {
+      isError = true;
       const message = (err as Error).message;
       log.error('provider_request_error', { error: message });
       const code = message === 'decrypt_failed' ? 'decrypt_failed'
@@ -394,6 +402,8 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
         timestamp: Date.now(),
       });
     } finally {
+      const latencyMs = Date.now() - requestStart;
+      metrics.recordRequest(modelName, latencyMs, isError);
       activeRequests--;
     }
   }
@@ -415,6 +425,10 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
       capacity,
       version: PROVIDER_VERSION,
     });
+  });
+
+  healthApp.get('/metrics', (c) => {
+    return c.json(metrics.getMetrics());
   });
 
   let healthServer: ReturnType<typeof serve> | undefined;
