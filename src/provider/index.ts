@@ -53,6 +53,7 @@ export async function handleRequest(
   onChunk?: (chunk: string) => void,
   apiBase?: string,
   proxySecret?: string,
+  abortSignal?: AbortSignal,
 ): Promise<HandleRequestResult> {
   const anthropicModel = MODEL_MAP[inner.model] ?? inner.model;
 
@@ -120,6 +121,7 @@ export async function handleRequest(
         method: 'POST',
         headers,
         body: JSON.stringify(anthropicRequest),
+        signal: abortSignal,
       });
     } catch (err) {
       lastError = err as Error;
@@ -166,6 +168,7 @@ export async function handleRequest(
     let buffer = '';
 
     while (true) {
+      if (abortSignal?.aborted) break;
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
@@ -217,6 +220,8 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
   const apiBase = proxyUrl ?? undefined;
 
   let activeRequests = 0;
+  let isShuttingDown = false;
+  let shutdownController: AbortController | null = null;
   const metrics = new MetricsStore();
   const extraConnections: Connection[] = [];
 
@@ -336,6 +341,11 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
   }
 
   async function handleIncomingRequest(msg: WsMessage): Promise<void> {
+    if (isShuttingDown) {
+      log.info('request_rejected_shutting_down', { request_id: msg.request_id });
+      return;
+    }
+
     const requestStart = Date.now();
     let isError = false;
     let modelName = 'unknown';
@@ -405,7 +415,7 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
             } satisfies StreamChunkPayload,
             timestamp: Date.now(),
           });
-        }, apiBase, proxySecret);
+        }, apiBase, proxySecret, shutdownController?.signal ?? undefined);
 
         // Send finish_reason chunk
         const finishChunk = JSON.stringify({ finish_reason: result.finish_reason });
@@ -432,7 +442,7 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
         });
       } else {
         // Non-streaming mode
-        const result = await handleRequest(inner, apiKey!, undefined, apiBase, proxySecret);
+        const result = await handleRequest(inner, apiKey!, undefined, apiBase, proxySecret, shutdownController?.signal ?? undefined);
         const responseBody = JSON.stringify({
           content: result.content,
           usage: result.usage,
@@ -504,6 +514,26 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
 
   return {
     async close(): Promise<void> {
+      isShuttingDown = true;
+      shutdownController = new AbortController();
+
+      if (activeRequests > 0) {
+        const graceStart = Date.now();
+        await new Promise<void>((resolve) => {
+          const checkInterval = setInterval(() => {
+            if (activeRequests === 0 || Date.now() - graceStart >= 5_000) {
+              clearInterval(checkInterval);
+              resolve();
+            }
+          }, 100);
+        });
+      }
+
+      if (activeRequests > 0) {
+        shutdownController.abort();
+        await new Promise(r => setTimeout(r, 500));
+      }
+
       healthServer?.close();
       for (const ec of extraConnections) {
         ec.close();

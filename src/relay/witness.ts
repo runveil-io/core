@@ -275,6 +275,14 @@ export class WitnessStore {
     return rows.map((r) => this.rowToRecord(r));
   }
 
+  checkpoint(): void {
+    try {
+      this.db.pragma('wal_checkpoint(TRUNCATE)');
+    } catch {
+      // Best effort
+    }
+  }
+
   close(): void {
     this.db.close();
   }

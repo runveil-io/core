@@ -61,3 +61,12 @@ export function initDatabase(dbPath: string): Database.Database {
 
   return db;
 }
+
+export function checkpointAndClose(db: Database.Database): void {
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)');
+  } catch {
+    // Best effort — DB may already be closed or in error state
+  }
+  db.close();
+}

@@ -337,16 +337,30 @@ async function cmdProvideStart(): Promise<void> {
   output.write(`  ${colors.bold('Relay:')}      ${colors.info(relayUrl)}\n`);
   output.write(`  ${colors.bold('Status:')}     ${colors.success('Waiting for requests...')}\n`);
 
+  let isShuttingDown = false;
   process.on('SIGINT', async () => {
+    if (isShuttingDown) { process.exit(1); }
+    isShuttingDown = true;
     output.write('\n');
-    output.write(colors.warning('Shutting down provider...\n'));
+    output.write(colors.warning('Shutting down...\n'));
+    const forceTimeout = setTimeout(() => {
+      output.write(colors.error('Shutdown timed out. Force exiting.\n'));
+      process.exit(1);
+    }, 30_000);
+    forceTimeout.unref();
     await provider.close();
-    output.write(colors.success('Provider stopped.\n'));
-    process.exit(0);
+    clearTimeout(forceTimeout);
+    output.write(colors.success('Done.\n'));
+    process.exitCode = 0;
   });
   process.on('SIGTERM', async () => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    const forceTimeout = setTimeout(() => process.exit(1), 30_000);
+    forceTimeout.unref();
     await provider.close();
-    process.exit(0);
+    clearTimeout(forceTimeout);
+    process.exitCode = 0;
   });
 }
 
@@ -373,16 +387,30 @@ async function cmdRelayStart(): Promise<void> {
   output.write(`  ${colors.bold('WebSocket:')}  ${colors.info(`ws://0.0.0.0:${port}`)}\n`);
   output.write(`  ${colors.bold('Providers:')}  ${colors.success('0 connected')}\n`);
 
+  let isShuttingDown = false;
   process.on('SIGINT', async () => {
+    if (isShuttingDown) { process.exit(1); }
+    isShuttingDown = true;
     output.write('\n');
-    output.write(colors.warning('Shutting down relay...\n'));
+    output.write(colors.warning('Shutting down...\n'));
+    const forceTimeout = setTimeout(() => {
+      output.write(colors.error('Shutdown timed out. Force exiting.\n'));
+      process.exit(1);
+    }, 30_000);
+    forceTimeout.unref();
     await relay.close();
-    output.write(colors.success('Relay stopped.\n'));
-    process.exit(0);
+    clearTimeout(forceTimeout);
+    output.write(colors.success('Done.\n'));
+    process.exitCode = 0;
   });
   process.on('SIGTERM', async () => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    const forceTimeout = setTimeout(() => process.exit(1), 30_000);
+    forceTimeout.unref();
     await relay.close();
-    process.exit(0);
+    clearTimeout(forceTimeout);
+    process.exitCode = 0;
   });
 }
 
@@ -874,16 +902,30 @@ async function cmdUseStart(): Promise<void> {
   output.write(`  ${colors.bold('Budget:')}      ${colors.info(`$${defaultBudgetUsdc.toFixed(2)} per request`)}\n`);
   output.write(`  ${colors.bold('Relay:')}       ${colors.info(relayUrl)}\n`);
 
+  let isShuttingDown = false;
   process.on('SIGINT', async () => {
+    if (isShuttingDown) { process.exit(1); }
+    isShuttingDown = true;
     output.write('\n');
-    output.write(colors.warning('Shutting down consumer...\n'));
+    output.write(colors.warning('Shutting down...\n'));
+    const forceTimeout = setTimeout(() => {
+      output.write(colors.error('Shutdown timed out. Force exiting.\n'));
+      process.exit(1);
+    }, 30_000);
+    forceTimeout.unref();
     await gateway.close();
-    output.write(colors.success('Consumer stopped.\n'));
-    process.exit(0);
+    clearTimeout(forceTimeout);
+    output.write(colors.success('Done.\n'));
+    process.exitCode = 0;
   });
   process.on('SIGTERM', async () => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    const forceTimeout = setTimeout(() => process.exit(1), 30_000);
+    forceTimeout.unref();
     await gateway.close();
-    process.exit(0);
+    clearTimeout(forceTimeout);
+    process.exitCode = 0;
   });
 }
 

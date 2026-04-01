@@ -133,6 +133,13 @@ export async function startGateway(options: GatewayOptions): Promise<{
         onClose() {
           relayConnected = false;
           log.warn('relay_disconnected');
+
+          // Reject all pending requests — no terminal message will arrive
+          for (const [id, pending] of pendingRequests) {
+            pending.reject(new Error('relay connection closed'));
+            pendingRequests.delete(id);
+          }
+
           if (options.discoveryClient) {
             // Try to failover to a different relay
             excludedRelays.push(currentRelayUrl);
@@ -594,6 +601,25 @@ export async function startGateway(options: GatewayOptions): Promise<{
   return {
     async close(): Promise<void> {
       server.close();
+
+      if (pendingRequests.size > 0) {
+        const drainStart = Date.now();
+        await new Promise<void>((resolve) => {
+          const checkInterval = setInterval(() => {
+            if (pendingRequests.size === 0 || Date.now() - drainStart >= 30_000) {
+              clearInterval(checkInterval);
+              resolve();
+            }
+          }, 100);
+        });
+      }
+
+      for (const [id, pending] of pendingRequests) {
+        pending.reject(new Error('shutdown'));
+        pendingRequests.delete(id);
+      }
+
+      server.closeAllConnections();
       relayConn?.close();
     },
     port,

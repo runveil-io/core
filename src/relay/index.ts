@@ -4,7 +4,7 @@ import { createLogger } from '../logger.js';
 import { WitnessStore } from './witness.js';
 
 const log = createLogger('relay');
-import { initDatabase } from '../db.js';
+import { initDatabase, checkpointAndClose } from '../db.js';
 import { verify, sign, sha256, toHex, fromHex } from '../crypto/index.js';
 import { RateLimiter } from './rate_limiter.js';
 import { MAX_REQUEST_AGE_MS } from '../config/bootstrap.js';
@@ -409,6 +409,23 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
           providers.delete(providerId);
           try { removeProvider.run(providerId); } catch { /* db may be closed */ }
           log.info('provider_disconnected', { id: providerId.slice(0, 16) });
+
+          // Clean up in-flight requests routed to this provider
+          for (const [requestId, meta] of requestMeta) {
+            if (meta.providerId === providerId) {
+              const consumerConn = consumers.get(requestId);
+              if (consumerConn) {
+                consumerConn.send({
+                  type: 'error',
+                  request_id: requestId,
+                  payload: { code: 'provider_disconnected', message: 'Provider disconnected during request' },
+                  timestamp: Date.now(),
+                });
+              }
+              consumers.delete(requestId);
+              requestMeta.delete(requestId);
+            }
+          }
         }
       });
     },
@@ -481,8 +498,9 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
         }
       }
 
-      server.close();
-      db.close();
+      server.closeAll();
+      checkpointAndClose(db);
+      witnessStore.checkpoint();
       witnessStore.close();
     },
     witnessStore,

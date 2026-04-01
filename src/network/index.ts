@@ -15,7 +15,7 @@ import {
 export interface Connection {
   ws: WebSocket;
   send(msg: WsMessage): void;
-  close(): void;
+  close(code?: number, reason?: string): void;
   readonly readyState: 'connecting' | 'open' | 'closing' | 'closed';
 }
 
@@ -43,8 +43,10 @@ function wrapConnection(ws: WebSocket): Connection {
         ws.send(JSON.stringify(msg));
       }
     },
-    close(): void {
-      ws.close();
+    close(code?: number, reason?: string): void {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close(code ?? 1001, reason ?? 'going away');
+      }
     },
     get readyState(): Connection['readyState'] {
       return WS_STATE_MAP[ws.readyState] ?? 'closed';
@@ -68,10 +70,12 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
         this.ws.send(JSON.stringify(msg));
       }
     },
-    close(): void {
+    close(code?: number, reason?: string): void {
       intentionallyClosed = true;
       cleanup();
-      this.ws?.close();
+      if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) {
+        this.ws.close(code ?? 1001, reason ?? 'going away');
+      }
     },
     get readyState(): Connection['readyState'] {
       return WS_STATE_MAP[this.ws?.readyState ?? WebSocket.CLOSED] ?? 'closed';
@@ -153,7 +157,7 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
 export function createServer(options: {
   port: number;
   onConnection: (conn: Connection, req: IncomingMessage) => void;
-}): { close(): void; port: number; address: () => { port: number } } {
+}): { close(): void; closeAll(): void; port: number; address: () => { port: number } } {
   const wss = new WebSocketServer({
     port: options.port,
     maxPayload: MAX_MESSAGE_SIZE,
@@ -166,6 +170,14 @@ export function createServer(options: {
 
   return {
     close() { wss.close(); },
+    closeAll() {
+      for (const client of wss.clients) {
+        if (client.readyState === WebSocket.OPEN) {
+          client.close(1001, 'server shutting down');
+        }
+      }
+      wss.close();
+    },
     get port() { return (wss.address() as { port: number }).port; },
     address() { return wss.address() as { port: number }; },
   };
