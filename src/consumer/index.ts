@@ -42,6 +42,8 @@ function errorResponse(message: string, type: string, code: string | null, statu
   });
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function constantTimeCompare(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let result = 0;
@@ -124,13 +126,17 @@ export async function startGateway(options: GatewayOptions): Promise<{
     }
   }
 
-  function selectProvider(model: string): ProviderInfo | null {
+  function selectProvider(model: string, excludeIds: string[] = []): ProviderInfo | null {
     const available = providers.filter(
-      (p) => p.models.includes(model) && p.capacity > 0,
+      (p) => p.models.includes(model) && p.capacity > 0 && !excludeIds.includes(p.provider_id)
     );
-    if (available.length === 0) return null;
-    // Simple: pick first available
-    return available[0]!;
+    if (available.length > 0) return available[0]!;
+    // Fallback: If we exhausted all and need to retry, just pick any available ignoring exclusions
+    const anyAvailable = providers.filter((p) => p.models.includes(model) && p.capacity > 0);
+    if (anyAvailable.length > 0) {
+      return anyAvailable[Math.floor(Math.random() * anyAvailable.length)]!;
+    }
+    return null;
   }
 
   function buildRequest(
@@ -256,79 +262,110 @@ export async function startGateway(options: GatewayOptions): Promise<{
       return errorResponse('Relay not connected', 'api_error', null, 502);
     }
 
-    const provider = selectProvider(body.model);
-    if (!provider) {
-      return errorResponse('No providers available', 'api_error', 'no_providers', 503);
-    }
-
-    const requestId = 'veil-' + nanoid(24);
-    let wsMsg: WsMessage;
-    try {
-      wsMsg = buildRequest(requestId, body, provider);
-    } catch (err: any) {
-      log.error('build_request_failed', { error: err.message });
-      return errorResponse('Failed to build request: ' + err.message, 'api_error', null, 500);
-    }
-
     if (body.stream) {
       // Streaming response
       const created = Math.floor(Date.now() / 1000);
       const stream = new ReadableStream({
-        start(controller) {
+        async start(controller) {
           const encoder = new TextEncoder();
           let sentRole = false;
+          let attempts = 0;
+          const excludeIds: string[] = [];
+          let midStream = false;
 
-          const pending = {
-            resolve: (_value: unknown) => {
-              controller.close();
-            },
-            reject: (err: Error) => {
-              const errChunk = makeChunk(requestId, body.model, created, {}, null);
-              controller.enqueue(encoder.encode(errChunk));
+          while (attempts <= 3) {
+            const provider = selectProvider(body.model, excludeIds);
+            if (!provider) {
+               const errChunk = makeChunk('veil-error', body.model, created, {}, null);
+               controller.enqueue(encoder.encode(errChunk));
+               controller.enqueue(encoder.encode(makeDone()));
+               controller.close();
+               break;
+            }
+
+            const requestId = 'veil-' + nanoid(24);
+            let wsMsg: WsMessage;
+            try {
+              wsMsg = buildRequest(requestId, body, provider);
+            } catch (err: any) {
+               controller.close();
+               break;
+            }
+
+            try {
+              await new Promise<void>((resolve, reject) => {
+                const pending = {
+                  resolve: (_value: unknown) => {
+                    resolve();
+                  },
+                  reject: (err: Error) => {
+                    reject(err);
+                  },
+                  onChunk: (msg: WsMessage) => {
+                    if (msg.type === 'stream_chunk') {
+                      const payload = msg.payload as StreamChunkPayload;
+                      const decrypted = open(
+                        new Uint8Array(Buffer.from(payload.encrypted_chunk, 'base64')),
+                        wallet.encryptionSecretKey,
+                      );
+                      if (!decrypted) return;
+                      const text = new TextDecoder().decode(decrypted);
+
+                      midStream = true;
+
+                      try {
+                        const parsed = JSON.parse(text) as { role?: string; content?: string; finish_reason?: string };
+                        if (parsed.role && !sentRole) {
+                          sentRole = true;
+                          controller.enqueue(
+                            encoder.encode(makeChunk(requestId, body.model, created, { role: parsed.role }, null)),
+                          );
+                        } else if (parsed.finish_reason) {
+                          controller.enqueue(
+                            encoder.encode(makeChunk(requestId, body.model, created, {}, parsed.finish_reason)),
+                          );
+                        } else {
+                          // Plain text content
+                          controller.enqueue(
+                            encoder.encode(makeChunk(requestId, body.model, created, { content: text }, null)),
+                          );
+                        }
+                      } catch {
+                        // Plain text content
+                        controller.enqueue(
+                          encoder.encode(makeChunk(requestId, body.model, created, { content: text }, null)),
+                        );
+                      }
+                    } else if (msg.type === 'stream_end') {
+                      resolve();
+                    }
+                  },
+                };
+
+                pendingRequests.set(requestId, pending);
+                relayConn!.send(wsMsg);
+              });
+
+              // Request completed successfully
               controller.enqueue(encoder.encode(makeDone()));
               controller.close();
-            },
-            onChunk: (msg: WsMessage) => {
-              if (msg.type === 'stream_chunk') {
-                const payload = msg.payload as StreamChunkPayload;
-                const decrypted = open(
-                  new Uint8Array(Buffer.from(payload.encrypted_chunk, 'base64')),
-                  wallet.encryptionSecretKey,
-                );
-                if (!decrypted) return;
-                const text = new TextDecoder().decode(decrypted);
+              return;
 
-                try {
-                  const parsed = JSON.parse(text) as { role?: string; content?: string; finish_reason?: string };
-                  if (parsed.role && !sentRole) {
-                    sentRole = true;
-                    controller.enqueue(
-                      encoder.encode(makeChunk(requestId, body.model, created, { role: parsed.role }, null)),
-                    );
-                  } else if (parsed.finish_reason) {
-                    controller.enqueue(
-                      encoder.encode(makeChunk(requestId, body.model, created, {}, parsed.finish_reason)),
-                    );
-                  } else {
-                    // Plain text content
-                    controller.enqueue(
-                      encoder.encode(makeChunk(requestId, body.model, created, { content: text }, null)),
-                    );
-                  }
-                } catch {
-                  // Plain text content
-                  controller.enqueue(
-                    encoder.encode(makeChunk(requestId, body.model, created, { content: text }, null)),
-                  );
-                }
-              } else if (msg.type === 'stream_end') {
-                controller.enqueue(encoder.encode(makeDone()));
+            } catch (err: any) {
+              const msg = err.message;
+              if (midStream || msg.includes('invalid_request') || msg.includes('rate_limit') || msg.includes('invalid_signature') || msg.includes('decrypt_failed') || attempts === 3) {
+                 const errChunk = makeChunk(requestId, body.model, created, {}, null);
+                 controller.enqueue(encoder.encode(errChunk));
+                 controller.enqueue(encoder.encode(makeDone()));
+                 controller.close();
+                 return;
               }
-            },
-          };
 
-          pendingRequests.set(requestId, pending);
-          relayConn!.send(wsMsg);
+              excludeIds.push(provider.provider_id);
+              attempts++;
+              await sleep((1 << (attempts - 1)) * 1000); // 1s, 2s, 4s
+            }
+          }
         },
       });
 
@@ -341,70 +378,106 @@ export async function startGateway(options: GatewayOptions): Promise<{
       });
     } else {
       // Non-streaming response
-      return new Promise<Response>((httpResolve) => {
-        const timeout = setTimeout(() => {
-          pendingRequests.delete(requestId);
-          httpResolve(errorResponse('Request timeout', 'api_error', 'timeout', 504));
-        }, Number(process.env['VEIL_REQUEST_TIMEOUT'] ?? 120000));
+      return new Promise<Response>(async (httpResolve) => {
+        let attempts = 0;
+        const excludeIds: string[] = [];
 
-        pendingRequests.set(requestId, {
-          resolve: (value) => {
-            clearTimeout(timeout);
-            const msg = value as WsMessage;
-            const payload = msg.payload as ResponsePayload;
-
-            const decrypted = open(
-              new Uint8Array(Buffer.from(payload.encrypted_body, 'base64')),
-              wallet.encryptionSecretKey,
-            );
-            if (!decrypted) {
-              httpResolve(errorResponse('Failed to decrypt response', 'api_error', 'decrypt_failed', 500));
-              return;
+        while (attempts <= 3) {
+          const provider = selectProvider(body.model, excludeIds);
+          if (!provider) {
+            if (attempts === 0) {
+              return httpResolve(errorResponse('No providers available', 'api_error', 'no_providers', 503));
             }
+            break; // give up and throw error below
+          }
 
-            const result = JSON.parse(new TextDecoder().decode(decrypted)) as {
-              content: string;
-              usage: { input_tokens: number; output_tokens: number };
-              finish_reason: string;
-            };
+          const requestId = 'veil-' + nanoid(24);
+          let wsMsg: WsMessage;
+          try {
+            wsMsg = buildRequest(requestId, body, provider);
+          } catch (err: any) {
+             return httpResolve(errorResponse('Failed to build request: ' + err.message, 'api_error', null, 500));
+          }
 
-            const response: ChatCompletionResponse = {
-              id: requestId,
-              object: 'chat.completion',
-              created: Math.floor(Date.now() / 1000),
-              model: body.model,
-              choices: [{
-                index: 0,
-                message: { role: 'assistant', content: result.content },
-                finish_reason: result.finish_reason as 'stop' | 'length',
-              }],
-              usage: {
-                prompt_tokens: result.usage.input_tokens,
-                completion_tokens: result.usage.output_tokens,
-                total_tokens: result.usage.input_tokens + result.usage.output_tokens,
-              },
-            };
+          try {
+            const resp = await new Promise<Response>((resolve, reject) => {
+              const timeout = setTimeout(() => {
+                pendingRequests.delete(requestId);
+                reject(new Error('timeout:Request timeout'));
+              }, Number(process.env['VEIL_REQUEST_TIMEOUT'] ?? 120000));
 
-            httpResolve(new Response(JSON.stringify(response), {
-              status: 200,
-              headers: { 'content-type': 'application/json' },
-            }));
-          },
-          reject: (err) => {
-            clearTimeout(timeout);
+              pendingRequests.set(requestId, {
+                resolve: (value) => {
+                  clearTimeout(timeout);
+                  const msg = value as WsMessage;
+                  const payload = msg.payload as ResponsePayload;
+
+                  const decrypted = open(
+                    new Uint8Array(Buffer.from(payload.encrypted_body, 'base64')),
+                    wallet.encryptionSecretKey,
+                  );
+                  if (!decrypted) {
+                    reject(new Error('decrypt_failed:Failed to decrypt response'));
+                    return;
+                  }
+
+                  const result = JSON.parse(new TextDecoder().decode(decrypted)) as {
+                    content: string;
+                    usage: { input_tokens: number; output_tokens: number };
+                    finish_reason: string;
+                  };
+
+                  const response: ChatCompletionResponse = {
+                    id: requestId,
+                    object: 'chat.completion',
+                    created: Math.floor(Date.now() / 1000),
+                    model: body.model,
+                    choices: [{
+                      index: 0,
+                      message: { role: 'assistant', content: result.content },
+                      finish_reason: result.finish_reason as 'stop' | 'length',
+                    }],
+                    usage: {
+                      prompt_tokens: result.usage.input_tokens,
+                      completion_tokens: result.usage.output_tokens,
+                      total_tokens: result.usage.input_tokens + result.usage.output_tokens,
+                    },
+                  };
+
+                  resolve(new Response(JSON.stringify(response), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                  }));
+                },
+                reject: (err) => {
+                  clearTimeout(timeout);
+                  reject(err);
+                },
+              });
+
+              relayConn!.send(wsMsg);
+            });
+            
+            return httpResolve(resp);
+          } catch (err: any) {
             const msg = err.message;
-            if (msg.includes('no_provider')) {
-              httpResolve(errorResponse('No providers available', 'api_error', 'no_providers', 503));
-            } else if (msg.includes('rate_limit')) {
-              httpResolve(errorResponse('Rate limit exceeded', 'api_error', 'rate_limit', 429));
-            } else {
-              log.error('request_rejected', { error: msg });
-              httpResolve(errorResponse('Internal error: ' + msg, 'api_error', null, 500));
+            if (msg.includes('invalid_request') || msg.includes('rate_limit') || msg.includes('invalid_signature') || msg.includes('decrypt_failed') || attempts === 3) {
+              if (msg.includes('no_provider') || msg.includes('no_providers')) {
+                return httpResolve(errorResponse('No providers available', 'api_error', 'no_providers', 503));
+              } else if (msg.includes('rate_limit')) {
+                return httpResolve(errorResponse('Rate limit exceeded', 'api_error', 'rate_limit', 429));
+              } else if (msg.includes('timeout')) {
+                return httpResolve(errorResponse('Request timeout', 'api_error', 'timeout', 504));
+              } else {
+                return httpResolve(errorResponse('Internal error: ' + msg, 'api_error', null, 500));
+              }
             }
-          },
-        });
-
-        relayConn!.send(wsMsg);
+            
+            excludeIds.push(provider.provider_id);
+            attempts++;
+            await sleep((1 << (attempts - 1)) * 1000); // 1s, 2s, 4s
+          }
+        }
       });
     }
   });
