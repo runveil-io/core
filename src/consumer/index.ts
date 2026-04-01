@@ -429,4 +429,21 @@ export async function startGateway(options: GatewayOptions): Promise<{
         } else if (msg.includes('timeout')) {
           return errorResponse('Request timeout', 'api_error', 'timeout', 504);
         } else {
-          console.log(JSON.stringify({ level: '
+          console.log(JSON.stringify({ level: 'error', msg: 'request_error', error: msg }));
+          return errorResponse('Internal error: ' + msg, 'api_error', null, 500);
+        }
+      }
+    }
+  });
+  // Connect to relay
+  await connectRelay();
+  const server = serve({ fetch: app.fetch, port });
+  console.log(JSON.stringify({ level: 'info', msg: 'gateway_started', port }));
+  return {
+    async close(): Promise<void> {
+      server.close();
+      relayConn?.close();
+    },
+    port,
+  };
+}
