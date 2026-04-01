@@ -9,10 +9,6 @@
 const ANTHROPIC_VERSIONS = [
   '2023-01-01',
   '2023-06-01',
-  '2024-01-01',
-  '2024-02-15',
-  '2024-06-01',
-  '2024-10-22',
 ];
 
 // Realistic User-Agent strings
