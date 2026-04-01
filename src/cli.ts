@@ -3,6 +3,7 @@ import { startGateway } from './consumer/index.js';
 import { startProvider } from './provider/index.js';
 import { startRelay } from './relay/index.js';
 import { DEFAULT_GATEWAY_PORT, DEFAULT_RELAY_PORT, OFFICIAL_RELAY_URL, MODEL_MAP } from './config/bootstrap.js';
+import { loadAndValidateConfig, loadAndValidateProviderConfig } from './config/validator.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -104,15 +105,21 @@ async function cmdProvideStart(): Promise<void> {
 
   const wallet = await loadWallet(password, home);
 
-  const providerPath = join(home, 'provider.json');
-  if (!existsSync(providerPath)) {
-    console.error("Run 'veil provide init' first.");
+  // Validate configs at startup (fixes #6)
+  let config: Record<string, unknown>;
+  let providerConfig: Record<string, unknown>;
+  try {
+    config = loadAndValidateConfig(home);
+  } catch (err) {
+    console.error((err as Error).message);
     process.exit(1);
   }
-
-  const providerConfig = JSON.parse(readFileSync(providerPath, 'utf-8'));
-  const configPath = join(home, 'config.json');
-  const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+  try {
+    providerConfig = loadAndValidateProviderConfig(home);
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
 
   // Decrypt API keys, fallback to env
   const apiKeys: Array<{ provider: 'anthropic'; key: string }> = [];
@@ -196,15 +203,16 @@ async function cmdRelayStart(): Promise<void> {
 
 async function cmdStatus(): Promise<void> {
   const home = getVeilHome();
-  const configPath = join(home, 'config.json');
 
-  if (!existsSync(configPath)) {
-    console.error("Not initialized. Run 'veil init'.");
+  // Validate config at startup (fixes #6)
+  let config: Record<string, unknown>;
+  try {
+    config = loadAndValidateConfig(home);
+  } catch (err) {
+    console.error((err as Error).message);
     process.exit(1);
   }
-
-  const config = JSON.parse(readFileSync(configPath, 'utf-8'));
-  const pk = config.consumer_pubkey;
+  const pk = config.consumer_pubkey as string;
 
   // Check gateway
   let gatewayStatus = 'stopped';
