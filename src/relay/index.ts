@@ -5,6 +5,7 @@ import { createLogger } from '../logger.js';
 const log = createLogger('relay');
 import { initDatabase } from '../db.js';
 import { verify, sign, sha256, toHex, fromHex } from '../crypto/index.js';
+import { RateLimiter } from './rate_limiter.js';
 import { MAX_REQUEST_AGE_MS } from '../config/bootstrap.js';
 import type {
   WsMessage,
@@ -124,6 +125,8 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
   const consumers = new Map<string, Connection>(); // request_id -> consumer conn
   const requestMeta = new Map<string, { consumerPubkey: string; providerId: string; model: string }>();
 
+  const rateLimiter = new RateLimiter(Number(process.env['VEIL_RELAY_RATE_LIMIT'] ?? 60));
+
   const insertWitness = db.prepare(`
     INSERT INTO witness (request_id, consumer_hash, provider_id, relay_id, model, input_tokens, output_tokens, timestamp, relay_signature)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -208,6 +211,18 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
         type: 'error',
         request_id: requestId,
         payload: { code: 'invalid_signature', message: 'Request signature verification failed' },
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    // Check rate limit
+    const rateLimit = rateLimiter.tryAcquire(payload.outer.consumer_pubkey);
+    if (!rateLimit.success) {
+      conn.send({
+        type: 'error',
+        request_id: requestId,
+        payload: { code: '429', message: `Rate limit exceeded. Retry-After: ${rateLimit.retryAfter}` },
         timestamp: Date.now(),
       });
       return;

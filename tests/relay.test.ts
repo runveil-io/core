@@ -313,4 +313,101 @@ describe('relay', () => {
 
     expect(valid).toBe(false);
   });
+
+  it('enforces rate limits on consumer requests', async () => {
+    if (relay) await relay.close();
+
+    process.env['VEIL_RELAY_RATE_LIMIT'] = '3';
+    
+    const relayWallet = makeWallet();
+    relayPort = 20200 + Math.floor(Math.random() * 100);
+    relay = await startRelay({
+      port: relayPort,
+      wallet: relayWallet,
+      dbPath: join(tempDir, 'relay6.db'),
+    });
+
+    const providerWallet = makeWallet();
+    const consumerWallet = makeWallet();
+
+    const consumerMessages: WsMessage[] = [];
+    const consumerConn = await connect({
+      url: `ws://localhost:${relayPort}`,
+      onMessage(msg) { consumerMessages.push(msg); },
+      onClose() {},
+      onError() {},
+      reconnect: false,
+    });
+    closables.push(consumerConn);
+
+    const providerConn = await connect({
+      url: `ws://localhost:${relayPort}`,
+      onMessage() {},
+      onClose() {},
+      onError() {},
+      reconnect: false,
+    });
+    closables.push(providerConn);
+
+    const helloTs = Date.now();
+    const helloPayload = {
+      provider_pubkey: toHex(providerWallet.signingPublicKey),
+      encryption_pubkey: toHex(providerWallet.encryptionPublicKey),
+      models: ['test-model'],
+      capacity: 100,
+    };
+    const helloSig = sign(
+      new TextEncoder().encode(JSON.stringify({ ...helloPayload, timestamp: helloTs })),
+      providerWallet.signingSecretKey,
+    );
+    providerConn.send({
+      type: 'provider_hello',
+      payload: { ...helloPayload, signature: toHex(helloSig) },
+      timestamp: helloTs,
+    });
+
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Send 4 requests. 3 should be fine, 4th should get 429
+    for (let i = 0; i < 4; i++) {
+      const innerPlaintext = 'test' + i;
+      const innerBase64 = Buffer.from(innerPlaintext).toString('base64');
+      const innerHash = toHex(sha256(new Uint8Array(Buffer.from(innerBase64, 'base64'))));
+      const requestId = 'req-' + i;
+      const reqTs = Date.now();
+      const signable = JSON.stringify({
+        request_id: requestId,
+        consumer_pubkey: toHex(consumerWallet.signingPublicKey),
+        provider_id: toHex(providerWallet.signingPublicKey),
+        model: 'test-model',
+        timestamp: reqTs,
+        inner_hash: innerHash,
+      });
+      const signature = sign(new TextEncoder().encode(signable), consumerWallet.signingSecretKey);
+  
+      consumerConn.send({
+        type: 'request',
+        request_id: requestId,
+        payload: {
+          outer: {
+            consumer_pubkey: toHex(consumerWallet.signingPublicKey),
+            provider_id: toHex(providerWallet.signingPublicKey),
+            model: 'test-model',
+            signature: toHex(signature),
+          },
+          inner: innerBase64,
+        },
+        timestamp: reqTs,
+      });
+    }
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    const errMessages = consumerMessages.filter(m => m.type === 'error' && (m.payload as any).code === '429');
+    expect(errMessages.length).toBe(1);
+    expect(errMessages[0].request_id).toBe('req-3');
+    
+    // Restore env var
+    delete process.env['VEIL_RELAY_RATE_LIMIT'];
+  });
 });
