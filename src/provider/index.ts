@@ -1,6 +1,11 @@
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
 import { connect } from '../network/index.js';
 import { open, seal, sign, toHex, fromHex } from '../crypto/index.js';
 import { MODEL_MAP, RETRY_CONFIG } from '../config/bootstrap.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import type { Connection } from '../network/index.js';
 import type { Wallet } from '../wallet/index.js';
 import type {
@@ -10,6 +15,18 @@ import type {
   StreamChunkPayload,
 } from '../types.js';
 
+// Read version from package.json at module load time (no runtime external calls)
+let PKG_VERSION = '0.0.0';
+try {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = dirname(__filename);
+  const pkgPath = join(__dirname, '..', '..', 'package.json');
+  const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+  PKG_VERSION = pkg.version ?? '0.0.0';
+} catch {
+  // Fallback if package.json is not found (e.g. in tests)
+}
+
 export interface ProviderOptions {
   wallet: Wallet;
   relayUrl: string;
@@ -17,6 +34,45 @@ export interface ProviderOptions {
   maxConcurrent: number;
   proxyUrl?: string;      // e.g. http://127.0.0.1:4000
   proxySecret?: string;   // shared secret for proxy auth
+  healthPort?: number;    // port for health check HTTP server (default: 9961)
+}
+
+export interface HealthResponse {
+  status: 'ok';
+  uptime: number;
+  models: string[];
+  capacity: { current: number; max: number };
+  version: string;
+}
+
+export function createHealthApp(options: {
+  startTime: number;
+  models: string[];
+  maxConcurrent: number;
+  getActiveRequests: () => number;
+  version?: string;
+}): Hono {
+  const { startTime, models, maxConcurrent, getActiveRequests } = options;
+  const version = options.version ?? PKG_VERSION;
+
+  const app = new Hono();
+
+  app.get('/health', (c) => {
+    const uptimeSeconds = Math.floor((Date.now() - startTime) / 1000);
+    const response: HealthResponse = {
+      status: 'ok',
+      uptime: uptimeSeconds,
+      models,
+      capacity: {
+        current: getActiveRequests(),
+        max: maxConcurrent,
+      },
+      version,
+    };
+    return c.json(response);
+  });
+
+  return app;
 }
 
 export interface HandleRequestResult {
@@ -198,12 +254,25 @@ export async function handleRequest(
 }
 
 export async function startProvider(options: ProviderOptions): Promise<{ close(): Promise<void> }> {
-  const { wallet, relayUrl, apiKeys, maxConcurrent, proxyUrl, proxySecret } = options;
+  const { wallet, relayUrl, apiKeys, maxConcurrent, proxyUrl, proxySecret, healthPort } = options;
   const apiKey = proxyUrl ? 'proxy' : apiKeys.find((k) => k.provider === 'anthropic')?.key;
   if (!apiKey && !proxyUrl) throw new Error('No Anthropic API key or proxy configured');
   const apiBase = proxyUrl ?? undefined;
 
   let activeRequests = 0;
+  const startTime = Date.now();
+  const models = Object.keys(MODEL_MAP);
+
+  // Start health check HTTP server
+  const healthApp = createHealthApp({
+    startTime,
+    models,
+    maxConcurrent,
+    getActiveRequests: () => activeRequests,
+  });
+  const port = healthPort ?? 9961;
+  const healthServer = serve({ fetch: healthApp.fetch, port });
+  console.log(JSON.stringify({ level: 'info', msg: 'health_server_started', port }));
 
   const conn = await connect({
     url: relayUrl,
@@ -244,7 +313,6 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
   });
 
   // Send provider_hello
-  const models = Object.keys(MODEL_MAP);
   const helloPayload = {
     provider_pubkey: toHex(wallet.signingPublicKey),
     encryption_pubkey: toHex(wallet.encryptionPublicKey),
@@ -391,6 +459,7 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
 
   return {
     async close(): Promise<void> {
+      healthServer.close();
       conn.close();
     },
   };

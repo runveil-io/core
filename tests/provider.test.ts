@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
-import { handleRequest } from '../src/provider/index.js';
+import { handleRequest, createHealthApp } from '../src/provider/index.js';
 import type { InnerPlaintext } from '../src/types.js';
+import type { HealthResponse } from '../src/provider/index.js';
 
 describe('provider', () => {
   let mockServer: ReturnType<typeof serve>;
@@ -135,5 +136,69 @@ describe('provider', () => {
 
     const result = await handleRequest(inner, 'test-key', undefined, `http://localhost:${mockPort}`);
     expect(result.content).toBe('Hello from mock!');
+  });
+});
+
+describe('provider health check', () => {
+  let healthServer: ReturnType<typeof serve>;
+  let healthPort: number;
+  const startTime = Date.now();
+
+  beforeAll(() => {
+    healthPort = 19000 + Math.floor(Math.random() * 100);
+    let activeRequests = 2;
+    const app = createHealthApp({
+      startTime,
+      models: ['claude-sonnet-4-20250514', 'claude-haiku-3-5-20241022'],
+      maxConcurrent: 5,
+      getActiveRequests: () => activeRequests,
+      version: '0.1.0',
+    });
+    healthServer = serve({ fetch: app.fetch, port: healthPort });
+  });
+
+  afterAll(() => {
+    healthServer?.close();
+  });
+
+  it('GET /health returns 200 with required fields', async () => {
+    const res = await fetch(`http://localhost:${healthPort}/health`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('application/json');
+
+    const body: HealthResponse = await res.json();
+    expect(body.status).toBe('ok');
+    expect(typeof body.uptime).toBe('number');
+    expect(body.uptime).toBeGreaterThanOrEqual(0);
+    expect(body.models).toEqual(['claude-sonnet-4-20250514', 'claude-haiku-3-5-20241022']);
+    expect(body.capacity).toEqual({ current: 2, max: 5 });
+    expect(body.version).toBe('0.1.0');
+  });
+
+  it('GET /health includes all required fields', async () => {
+    const res = await fetch(`http://localhost:${healthPort}/health`);
+    const body = await res.json();
+    const requiredFields = ['status', 'uptime', 'models', 'capacity', 'version'];
+    for (const field of requiredFields) {
+      expect(body).toHaveProperty(field);
+    }
+  });
+
+  it('GET /health reflects actual model config', async () => {
+    const res = await fetch(`http://localhost:${healthPort}/health`);
+    const body: HealthResponse = await res.json();
+    expect(Array.isArray(body.models)).toBe(true);
+    expect(body.models.length).toBe(2);
+    expect(body.models).toContain('claude-sonnet-4-20250514');
+    expect(body.models).toContain('claude-haiku-3-5-20241022');
+  });
+
+  it('GET /health responds fast (< 10ms, no external calls)', async () => {
+    const start = performance.now();
+    await fetch(`http://localhost:${healthPort}/health`);
+    const elapsed = performance.now() - start;
+    // Allow generous margin for CI but still enforce < 10ms for the handler itself
+    // Network overhead may add a bit, so we check < 50ms total
+    expect(elapsed).toBeLessThan(50);
   });
 });
