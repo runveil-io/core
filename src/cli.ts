@@ -3,6 +3,7 @@ import { startGateway } from './consumer/index.js';
 import { startProvider } from './provider/index.js';
 import { startRelay } from './relay/index.js';
 import { RbobLedger } from './rbob/index.js';
+import { WitnessStore } from './relay/witness.js';
 import { DEFAULT_GATEWAY_PORT, DEFAULT_RELAY_PORT, OFFICIAL_RELAY_URL, MODEL_MAP, DEFAULT_BOOTSTRAP_URL, RELAY_DISCOVERY_CACHE_TTL_MS, RELAY_DISCOVERY_MAX_RELAYS } from './config/bootstrap.js';
 import type { RelayDiscoveryMode } from './config/bootstrap.js';
 import { RelayDiscoveryClient } from './discovery/client.js';
@@ -645,6 +646,90 @@ async function cmdRelays(): Promise<void> {
   }
 }
 
+// ============== Witness Commands ==============
+
+function getWitnessDbPath(): string {
+  const home = getVeilHome();
+  return join(home, 'data', 'witness.db');
+}
+
+async function cmdWitnessGet(): Promise<void> {
+  const requestId = process.argv[3];
+  if (!requestId) {
+    console.error(colors.error('Usage: veil witness <request_id>'));
+    process.exit(1);
+  }
+
+  const store = new WitnessStore(getWitnessDbPath());
+  try {
+    const record = store.get(requestId);
+    if (!record) {
+      output.write(colors.error(`No witness found for request ${requestId}\n`));
+      process.exit(1);
+    }
+
+    output.write('\n');
+    output.write(colors.bold('Witness Record\n'));
+    output.write(colors.dim('─'.repeat(60)) + '\n');
+    output.write(`  ${colors.bold('Request ID:')}      ${colors.info(record.request_id)}\n`);
+    output.write(`  ${colors.bold('Consumer:')}        ${colors.info(record.consumer_pubkey.slice(0, 16) + '...')}\n`);
+    output.write(`  ${colors.bold('Provider:')}        ${colors.info(record.provider_pubkey.slice(0, 16) + '...')}\n`);
+    output.write(`  ${colors.bold('Model:')}           ${record.model}\n`);
+    output.write(`  ${colors.bold('Input tokens:')}    ${record.input_tokens}\n`);
+    output.write(`  ${colors.bold('Output tokens:')}   ${record.output_tokens}\n`);
+    if (record.cache_read_tokens) {
+      output.write(`  ${colors.bold('Cache read:')}      ${record.cache_read_tokens}\n`);
+    }
+    if (record.cache_write_tokens) {
+      output.write(`  ${colors.bold('Cache write:')}     ${record.cache_write_tokens}\n`);
+    }
+    output.write(`  ${colors.bold('Duration:')}        ${record.duration_ms}ms\n`);
+    output.write(`  ${colors.bold('Timestamp:')}       ${new Date(record.timestamp).toISOString()}\n`);
+    output.write(`  ${colors.bold('Relay:')}           ${colors.dim(record.relay_pubkey.slice(0, 16) + '...')}\n`);
+    output.write(`  ${colors.bold('Signature:')}       ${colors.dim(record.relay_signature.slice(0, 32) + '...')}\n`);
+    output.write('\n');
+  } finally {
+    store.close();
+  }
+}
+
+async function cmdWitnessStats(): Promise<void> {
+  const store = new WitnessStore(getWitnessDbPath());
+  try {
+    const sinceIdx = process.argv.indexOf('--since');
+    const since = sinceIdx !== -1 ? new Date(process.argv[sinceIdx + 1]!).getTime() : undefined;
+
+    const s = store.stats({ since });
+
+    output.write('\n');
+    output.write(colors.bold('Witness Stats\n'));
+    output.write(colors.dim('─'.repeat(50)) + '\n');
+    output.write(`  ${colors.bold('Total requests:')}     ${colors.info(String(s.total_requests))}\n`);
+    output.write(`  ${colors.bold('Input tokens:')}      ${colors.info(String(s.total_input_tokens))}\n`);
+    output.write(`  ${colors.bold('Output tokens:')}     ${colors.info(String(s.total_output_tokens))}\n`);
+    output.write(`  ${colors.bold('Unique consumers:')}  ${colors.info(String(s.unique_consumers))}\n`);
+    output.write(`  ${colors.bold('Unique providers:')}  ${colors.info(String(s.unique_providers))}\n`);
+    output.write('\n');
+  } finally {
+    store.close();
+  }
+}
+
+async function cmdWitnessExport(): Promise<void> {
+  const store = new WitnessStore(getWitnessDbPath());
+  try {
+    const sinceIdx = process.argv.indexOf('--since');
+    const since = sinceIdx !== -1 ? new Date(process.argv[sinceIdx + 1]!).getTime() : undefined;
+    const limitIdx = process.argv.indexOf('--limit');
+    const limit = limitIdx !== -1 ? Number(process.argv[limitIdx + 1]) : undefined;
+
+    const records = store.export({ since, limit });
+    output.write(JSON.stringify(records, null, 2) + '\n');
+  } finally {
+    store.close();
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -699,6 +784,28 @@ async function main(): Promise<void> {
           break;
       }
       break;
+    case 'witness':
+      switch (args[1]) {
+        case 'stats':
+          await cmdWitnessStats();
+          break;
+        case 'export':
+          await cmdWitnessExport();
+          break;
+        default:
+          if (args[1] && args[1] !== '--help') {
+            await cmdWitnessGet();
+          } else {
+            output.write(colors.bold('Witness Log\n\n'));
+            output.write(colors.dim('Usage: veil witness <command>\n\n'));
+            output.write(colors.bold('Commands:\n'));
+            output.write(`  ${colors.info('<request_id>')}               Look up a witness record\n`);
+            output.write(`  ${colors.info('stats')}                      Aggregate stats\n`);
+            output.write(`  ${colors.info('export [--since <date>]')}    Export witnesses as JSON\n`);
+          }
+          break;
+      }
+      break;
     default:
       output.write(colors.bold('Veil - Decentralized AI Inference Protocol\n\n'));
       output.write(colors.dim('Usage: veil <command>\n\n'));
@@ -709,6 +816,7 @@ async function main(): Promise<void> {
       output.write(`  ${colors.info('relay start')}     Start Relay server\n`);
       output.write(`  ${colors.info('status')}          Check status\n`);
       output.write(`  ${colors.info('relays')}          List available relays\n`);
+      output.write(`  ${colors.info('witness')}         Witness log\n`);
       output.write(`  ${colors.info('rbob')}            RBOB points ledger\n`);
       break;
   }

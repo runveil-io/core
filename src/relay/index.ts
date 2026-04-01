@@ -1,6 +1,7 @@
 import type { Connection } from '../network/index.js';
 import { createServer } from '../network/index.js';
 import { createLogger } from '../logger.js';
+import { WitnessStore } from './witness.js';
 
 const log = createLogger('relay');
 import { initDatabase } from '../db.js';
@@ -22,6 +23,7 @@ export interface RelayOptions {
   wallet: Wallet;
   dbPath: string;
   bootstrapUrl?: string;
+  witnessDbPath?: string;
 }
 
 interface ConnectedProvider {
@@ -125,7 +127,12 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
   const db = initDatabase(dbPath);
   const providers = new Map<string, ConnectedProvider>();
   const consumers = new Map<string, Connection>(); // request_id -> consumer conn
-  const requestMeta = new Map<string, { consumerPubkey: string; providerId: string; model: string }>();
+  const requestMeta = new Map<string, { consumerPubkey: string; providerId: string; model: string; startTime: number }>();
+
+  // Initialize witness store (separate DB)
+  const witnessDbPath = options.witnessDbPath ?? dbPath.replace(/\.db$/, '-witness.db');
+  const witnessStore = new WitnessStore(witnessDbPath);
+  log.info('witness_store_initialized', { path: witnessDbPath });
 
   const rateLimiter = new RateLimiter(Number(process.env['VEIL_RELAY_RATE_LIMIT'] ?? 60));
 
@@ -248,6 +255,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
       consumerPubkey: payload.outer.consumer_pubkey,
       providerId: payload.outer.provider_id,
       model: payload.outer.model,
+      startTime: Date.now(),
     });
 
     // Forward to provider with consumer_pubkey redacted
@@ -312,6 +320,27 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
           );
         } catch {
           // Duplicate request_id, ignore
+        }
+
+        // Also record in the new witness store
+        const durationMs = Date.now() - meta.startTime;
+        try {
+          witnessStore.record(
+            {
+              request_id: requestId,
+              consumer_pubkey: meta.consumerPubkey,
+              provider_pubkey: meta.providerId,
+              model: meta.model,
+              input_tokens: usage.input_tokens,
+              output_tokens: usage.output_tokens,
+              duration_ms: durationMs,
+              timestamp: Date.now(),
+              relay_pubkey: toHex(wallet.signingPublicKey),
+            },
+            wallet.signingSecretKey,
+          );
+        } catch (err) {
+          log.warn('witness_store_record_failed', { request_id: requestId, error: (err as Error).message });
         }
       }
 
@@ -454,6 +483,8 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
       server.close();
       db.close();
+      witnessStore.close();
     },
+    witnessStore,
   };
 }
