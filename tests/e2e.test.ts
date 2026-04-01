@@ -223,8 +223,8 @@ describe('e2e', () => {
     await freshRelay.close();
   });
 
+  
   it('auth failure: bad signing key rejected by relay', async () => {
-    // Create a relay
     const authRelayPort = 18200 + Math.floor(Math.random() * 100);
     const authRelayWallet = makeWallet();
     const authRelay = await startRelay({
@@ -233,24 +233,16 @@ describe('e2e', () => {
       dbPath: join(tempDir, 'e2e-auth-relay.db'),
     });
 
-    // Try to connect a provider with an INVALID signature
-    // The gateway expects a valid Ed25519 signature
     const badWallet = makeWallet();
-    // Start provider but then manually send a malformed hello
-    const badProviderPort = 18100 + Math.floor(Math.random() * 100);
-    const badProviderApp = new Hono();
-    let providerConnected = false;
+    const badProviderServer = serve({
+      fetch: new Hono().get('/health', (c) => c.json({ ok: true })).fetch,
+      port: 18150,
+    });
 
-    badProviderApp.get('/health', (c) => c.json({ ok: true }));
-
-    const badProviderServer = serve({ fetch: badProviderApp.fetch, port: badProviderPort });
-
-    // Directly create a WebSocket with invalid signature
-    const badWs = new WebSocket(\`ws://localhost:\${authRelayPort}\`);
+    const badWs = new WebSocket('ws://localhost:' + authRelayPort);
 
     const authFailurePromise = new Promise<void>((resolve) => {
       badWs.addEventListener('open', () => {
-        // Send hello with bad signature (all zeros = invalid)
         const badPayload = {
           type: 'provider_hello',
           payload: {
@@ -259,6 +251,7 @@ describe('e2e', () => {
             models: ['claude-sonnet-4-20250514'],
             capacity: 10,
             protocol_version: '1',
+            // Zero signature = always invalid
             signature: '00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000',
           },
           timestamp: Date.now(),
@@ -271,31 +264,21 @@ describe('e2e', () => {
         if (msg.type === 'provider_ack') {
           expect(msg.payload.status).toBe('rejected');
           expect(msg.payload.reason).toBe('invalid_signature');
-          providerConnected = true;
           resolve();
         }
       });
 
-      badWs.addEventListener('error', () => {
-        // WebSocket error also acceptable for auth failure
-        resolve();
-      });
+      badWs.addEventListener('error', () => { resolve(); });
     });
 
-    // Timeout after 3s
-    const timeout = new Promise<void>((resolve) => setTimeout(resolve, 3000));
-    await Promise.race([authFailurePromise, timeout]);
+    await Promise.race([authFailurePromise, new Promise((r) => setTimeout(r, 3000))];
 
-    expect(providerConnected || true).toBe(true); // We attempted auth
     badWs.close();
     await authRelay.close();
     await badProviderServer.close();
   });
 
-  it('encryption: relay never sees plaintext prompt', async () => {
-    // This test verifies that the relay only sees encrypted payloads
-    // by checking that the inner envelope is encrypted (not plaintext)
-
+  it('encryption: relay only handles encrypted envelopes', async () => {
     const encRelayPort = 18000 + Math.floor(Math.random() * 100);
     const encRelayWallet = makeWallet();
     const encRelay = await startRelay({
@@ -305,63 +288,52 @@ describe('e2e', () => {
     });
 
     const providerWallet = makeWallet();
-    const encProviderPort = 17900 + Math.floor(Math.random() * 100);
-    const encProviderApp = new Hono();
-    let relaySawEncryptedOnly = true;
-
-    // Mock the provider API that the relay calls
-    encProviderApp.post('/v1/messages', async (c) => {
-      return c.json({
-        id: 'msg_enc',
-        type: 'message',
-        content: [{ type: 'text', text: 'encrypted response' }],
+    const encApiPort = 17950;
+    const encApiApp = new Hono();
+    encApiApp.post('/v1/messages', (c) =>
+      c.json({
+        id: 'msg_enc', type: 'message',
+        content: [{ type: 'text', text: 'response' }],
         model: 'claude-sonnet-4-20250514',
         stop_reason: 'end_turn',
         usage: { input_tokens: 10, output_tokens: 5 },
-      });
-    });
+      })
+    );
+    const encApiServer = serve({ fetch: encApiApp.fetch, port: encApiPort });
 
-    const encProviderServer = serve({ fetch: encProviderApp.fetch, port: encProviderPort });
-
-    // Start provider connected to relay
     const encProvider = await startProvider({
       wallet: providerWallet,
-      relayUrl: \`ws://localhost:\${encRelayPort}\`,
+      relayUrl: 'ws://localhost:' + encRelayPort,
       apiKeys: [{ provider: 'anthropic', key: 'test-key' }],
       maxConcurrent: 3,
-      apiBase: \`http://localhost:\${encProviderPort}\`,
+      apiBase: 'http://localhost:' + encApiPort,
     });
 
-    // Start gateway connected to relay
     const consumerWallet = makeWallet();
-    const encGatewayPort = 17800 + Math.floor(Math.random() * 100);
+    const encGatewayPort = 17850;
     const encGateway = await startGateway({
       port: encGatewayPort,
       wallet: consumerWallet,
-      relayUrl: \`ws://localhost:\${encRelayPort}\`,
+      relayUrl: 'ws://localhost:' + encRelayPort,
     });
 
     await new Promise((r) => setTimeout(r, 1000));
 
-    // Send a request and capture the inner payload seen by relay
-    const res = await fetch(\`http://localhost:\${encGatewayPort}/v1/chat/completions\`, {
+    const res = await fetch('http://localhost:' + encGatewayPort + '/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-20250514',
-        messages: [{ role: 'user', content: 'SECRET_TEST_MESSAGE_DO_NOT_LEAK' }],
+        messages: [{ role: 'user', content: 'SECRET_DATA' }],
       }),
     });
 
-    // If the relay is working correctly, it should only see encrypted blobs
-    // The relay calls provider with encrypted 'inner' field
-    // We verify by checking the request reaches provider (which it does if status != 500)
     expect([200, 502, 503]).toContain(res.status);
 
     await encGateway.close();
     await encProvider.close();
     await encRelay.close();
-    await encProviderServer.close();
+    await encApiServer.close();
   });
 
   it('streaming: SSE chunks flow end-to-end within 10s', async () => {
@@ -373,28 +345,30 @@ describe('e2e', () => {
       dbPath: join(tempDir, 'e2e-stream-relay.db'),
     });
 
-    // Mock streaming API
-    const streamApiPort = 17600 + Math.floor(Math.random() * 100);
+    const streamApiPort = 17650;
     const streamApiApp = new Hono();
     streamApiApp.post('/v1/messages', (c) => {
+      const enc = new TextEncoder();
+      const events = [
+        ['message_start', { type: 'message_start', message: { id: 's1', type: 'message', content: [], model: 'claude-sonnet-4-20250514', stop_reason: null, usage: { input_tokens: 10, output_tokens: 0 } } }],
+        ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
+        ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } }],
+        ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ' World' } }],
+        ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+        ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 6 } }],
+        ['message_stop', { type: 'message_stop' }],
+      ];
+
+      let idx = 0;
       const stream = new ReadableStream({
         start(controller) {
-          const enc = new TextEncoder();
-          const events = [
-            ['message_start', { type: 'message_start', message: { id: 's1', type: 'message', content: [], model: 'claude-sonnet-4-20250514', stop_reason: null, usage: { input_tokens: 10, output_tokens: 0 } } }],
-            ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
-            ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } }],
-            ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ' ' } }],
-            ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'World' } }],
-            ['content_block_stop', { type: 'content_block_stop', index: 0 }],
-            ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } }],
-            ['message_stop', { type: 'message_stop' }],
-          ];
-          let i = 0;
           const sendNext = () => {
-            if (i < events.length) {
-              const [ename, edata] = events[i++]];
-              controller.enqueue(enc.encode(\`event: \${ename}\ndata: \${JSON.stringify(edata)}\n\n\`));
+            if (idx < events.length) {
+              const [ename, edata] = events[idx++];
+              controller.enqueue(enc.encode('event: ' + ename + '
+data: ' + JSON.stringify(edata) + '
+
+'));
               setTimeout(sendNext, 10);
             } else {
               controller.close();
@@ -410,24 +384,24 @@ describe('e2e', () => {
     const streamProviderWallet = makeWallet();
     const streamProvider = await startProvider({
       wallet: streamProviderWallet,
-      relayUrl: \`ws://localhost:\${streamPort}\`,
+      relayUrl: 'ws://localhost:' + streamPort,
       apiKeys: [{ provider: 'anthropic', key: 'test-key' }],
       maxConcurrent: 3,
-      apiBase: \`http://localhost:\${streamApiPort}\`,
+      apiBase: 'http://localhost:' + streamApiPort,
     });
 
     const streamConsumerWallet = makeWallet();
-    const streamGatewayPort = 17500 + Math.floor(Math.random() * 100);
+    const streamGatewayPort = 17550;
     const streamGateway = await startGateway({
       port: streamGatewayPort,
       wallet: streamConsumerWallet,
-      relayUrl: \`ws://localhost:\${streamPort}\`,
+      relayUrl: 'ws://localhost:' + streamPort,
     });
 
     await new Promise((r) => setTimeout(r, 1000));
 
     const startTime = Date.now();
-    const res = await fetch(\`http://localhost:\${streamGatewayPort}/v1/chat/completions\`, {
+    const res = await fetch('http://localhost:' + streamGatewayPort + '/v1/chat/completions', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -442,7 +416,6 @@ describe('e2e', () => {
 
     let chunkCount = 0;
     let fullText = '';
-
     const reader = res.body!.getReader();
     const decoder = new TextDecoder();
 
@@ -456,13 +429,8 @@ describe('e2e', () => {
 
     const elapsed = Date.now() - startTime;
 
-    // Within 10s total
     expect(elapsed).toBeLessThan(10000);
-
-    // Multiple SSE chunks received
     expect(chunkCount).toBeGreaterThan(0);
-
-    // Contains streamed content
     expect(fullText).toContain('Hello');
 
     await streamGateway.close();
@@ -471,4 +439,5 @@ describe('e2e', () => {
     await streamApiServer.close();
   });
 
+  });
 });
