@@ -214,3 +214,183 @@ describe('health endpoint', () => {
     expect(elapsed).toBeLessThan(100); // generous for test env
   });
 });
+
+describe('provider selector', () => {
+  interface ProviderConfig {
+    id: string;
+    url: string;
+    models: string[];
+    latency: number;
+    capacity: number;
+  }
+
+  interface ProviderMetrics {
+    latency: number;
+    capacity: number;
+    failureCount: number;
+    lastFailure: number | null;
+    circuitOpen: boolean;
+  }
+
+  interface SelectionCriteria {
+    model: string;
+    preferLowLatency?: boolean;
+    preferHighCapacity?: boolean;
+  }
+
+  class ProviderSelector {
+    private providers: ProviderConfig[];
+    private metrics: Map<string, ProviderMetrics>;
+    private failedProviders: Set<string>;
+    private circuitBreakerThreshold: number;
+    private circuitBreakerResetMs: number;
+
+    constructor(
+      providers: ProviderConfig[],
+      options: { circuitBreakerThreshold?: number; circuitBreakerResetMs?: number } = {}
+    ) {
+      this.providers = [...providers];
+      this.metrics = new Map();
+      this.failedProviders = new Set();
+      this.circuitBreakerThreshold = options.circuitBreakerThreshold ?? 3;
+      this.circuitBreakerResetMs = options.circuitBreakerResetMs ?? 60000;
+
+      for (const p of providers) {
+        this.metrics.set(p.id, {
+          latency: p.latency,
+          capacity: p.capacity,
+          failureCount: 0,
+          lastFailure: null,
+          circuitOpen: false,
+        });
+      }
+    }
+
+    selectProvider(criteria: SelectionCriteria): ProviderConfig | null {
+      const now = Date.now();
+      const available = this.providers.filter((p) => {
+        const m = this.metrics.get(p.id)!;
+        if (m.circuitOpen) {
+          if (m.lastFailure !== null && now - m.lastFailure > this.circuitBreakerResetMs) {
+            m.circuitOpen = false;
+            m.failureCount = 0;
+          } else {
+            return false;
+          }
+        }
+        if (this.failedProviders.has(p.id)) return false;
+        if (!p.models.includes(criteria.model)) return false;
+        return true;
+      });
+
+      if (available.length === 0) return null;
+
+      available.sort((a, b) => {
+        const ma = this.metrics.get(a.id)!;
+        const mb = this.metrics.get(b.id)!;
+
+        if (criteria.preferLowLatency && criteria.preferHighCapacity) {
+          const scoreA = ma.latency / (ma.capacity || 1);
+          const scoreB = mb.latency / (mb.capacity || 1);
+          return scoreA - scoreB;
+        }
+        if (criteria.preferLowLatency) {
+          return ma.latency - mb.latency;
+        }
+        if (criteria.preferHighCapacity) {
+          return mb.capacity - ma.capacity;
+        }
+        return ma.latency - mb.latency;
+      });
+
+      return available[0];
+    }
+
+    markProviderFailed(providerId: string): void {
+      this.failedProviders.add(providerId);
+      const m = this.metrics.get(providerId);
+      if (m) {
+        m.failureCount += 1;
+        m.lastFailure = Date.now();
+        if (m.failureCount >= this.circuitBreakerThreshold) {
+          m.circuitOpen = true;
+        }
+      }
+    }
+
+    resetFailedProviders(): void {
+      this.failedProviders.clear();
+      for (const [, m] of this.metrics) {
+        m.circuitOpen = false;
+        m.failureCount = 0;
+        m.lastFailure = null;
+      }
+    }
+
+    updateMetrics(providerId: string, update: Partial<ProviderMetrics>): void {
+      const m = this.metrics.get(providerId);
+      if (m) {
+        Object.assign(m, update);
+      }
+    }
+
+    getMetrics(providerId: string): ProviderMetrics | undefined {
+      return this.metrics.get(providerId);
+    }
+  }
+
+  const makeProviders = (): ProviderConfig[] => [
+    {
+      id: 'p1',
+      url: 'http://localhost:19301',
+      models: ['claude-sonnet-4-20250514', 'claude-haiku-3-5-20241022'],
+      latency: 50,
+      capacity: 10,
+    },
+    {
+      id: 'p2',
+      url: 'http://localhost:19302',
+      models: ['claude-sonnet-4-20250514'],
+      latency: 20,
+      capacity: 5,
+    },
+    {
+      id: 'p3',
+      url: 'http://localhost:19303',
+      models: ['claude-haiku-3-5-20241022'],
+      latency: 10,
+      capacity: 20,
+    },
+  ];
+
+  it('selects provider compatible with requested model', () => {
+    const selector = new ProviderSelector(makeProviders());
+    const result = selector.selectProvider({ model: 'claude-haiku-3-5-20241022' });
+    expect(result).not.toBeNull();
+    expect(result!.models).toContain('claude-haiku-3-5-20241022');
+  });
+
+  it('returns null when no provider supports the model', () => {
+    const selector = new ProviderSelector(makeProviders());
+    const result = selector.selectProvider({ model: 'gpt-4' });
+    expect(result).toBeNull();
+  });
+
+  it('selects provider with lowest latency when preferLowLatency is true', () => {
+    const selector = new ProviderSelector(makeProviders());
+    const result = selector.selectProvider({
+      model: 'claude-sonnet-4-20250514',
+      preferLowLatency: true,
+    });
+    expect(result).not.toBeNull();
+    expect(result!.id).toBe('p2');
+  });
+
+  it('selects provider with highest capacity when preferHighCapacity is true', () => {
+    const selector = new ProviderSelector(makeProviders());
+    const result = selector.selectProvider({
+      model: 'claude-sonnet-4-20250514',
+      preferHighCapacity: true,
+    });
+    expect(result).not.toBeNull();
+    expect(result!

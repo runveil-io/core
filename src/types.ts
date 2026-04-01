@@ -136,3 +136,22 @@ export interface ProviderInfo {
   models: string[];
   capacity: number;
 }
+
+export interface ProviderMetrics {
+  provider_id: string;
+  latency_ms: number;
+  capacity: number;
+  success_count: number;
+  failure_count: number;
+  last_failure_at?: number;
+  last_success_at?: number;
+  circuit_open: boolean;
+  circuit_opened_at?: number;
+}
+
+export interface SelectionCriteria {
+  model: string;
+  preferred_latency_ms?: number;
+  min_capacity?: number;
+  exclude_provider_ids?: string[];
+}
