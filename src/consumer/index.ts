@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server';
 import { nanoid } from 'nanoid';
 import { connect } from '../network/index.js';
 import { seal, open, sign, sha256, toHex, fromHex } from '../crypto/index.js';
+import { Logger } from '../logger.js';
 import { MODELS, MODEL_MAP } from '../config/bootstrap.js';
 import { makeChunk, makeDone } from './anthropic-stream.js';
 import type { Connection } from '../network/index.js';
@@ -29,6 +30,7 @@ export interface GatewayOptions {
   apiKey?: string;
 }
 
+const logger = new Logger('consumer_gateway');
 const startTime = Date.now();
 
 function errorResponse(message: string, type: string, code: string | null, status: number): Response {
@@ -100,10 +102,10 @@ export async function startGateway(options: GatewayOptions): Promise<{
         },
         onClose() {
           relayConnected = false;
-          console.log(JSON.stringify({ level: 'warn', msg: 'relay_disconnected' }));
+          logger.warn('relay_disconnected');
         },
         onError(err) {
-          console.log(JSON.stringify({ level: 'error', msg: 'relay_error', error: err.message }));
+          logger.error('relay_error', { error: err.message });
         },
         reconnect: true,
       });
@@ -117,7 +119,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
         timestamp: Date.now(),
       });
     } catch (err) {
-      console.log(JSON.stringify({ level: 'error', msg: 'relay_connect_failed', error: (err as Error).message }));
+      logger.error('relay_connect_failed', { error: (err as Error).message });
     }
   }
 
@@ -263,7 +265,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
     try {
       wsMsg = buildRequest(requestId, body, provider);
     } catch (err: any) {
-      console.log(JSON.stringify({ level: 'error', msg: 'build_request_failed', error: err.message, stack: err.stack?.split('\n').slice(0, 3) }));
+      logger.error('build_request_failed', { error: err.message, stack: err.stack?.split('\n').slice(0, 3) });
       return errorResponse('Failed to build request: ' + err.message, 'api_error', null, 500);
     }
 
@@ -395,7 +397,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
             } else if (msg.includes('rate_limit')) {
               httpResolve(errorResponse('Rate limit exceeded', 'api_error', 'rate_limit', 429));
             } else {
-              console.log(JSON.stringify({ level: 'error', msg: 'request_rejected', error: msg }));
+              logger.error('request_rejected', { error: msg });
               httpResolve(errorResponse('Internal error: ' + msg, 'api_error', null, 500));
             }
           },
@@ -411,7 +413,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
 
   const server = serve({ fetch: app.fetch, port });
 
-  console.log(JSON.stringify({ level: 'info', msg: 'gateway_started', port }));
+  logger.info('gateway_started', { port });
 
   return {
     async close(): Promise<void> {

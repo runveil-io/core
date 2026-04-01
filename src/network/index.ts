@@ -8,6 +8,9 @@ import {
   WS_RECONNECT_MAX_MS,
   MAX_MESSAGE_SIZE,
 } from '../config/bootstrap.js';
+import { Logger } from '../logger.js';
+
+const logger = new Logger('network');
 
 export interface Connection {
   ws: WebSocket;
@@ -86,7 +89,7 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
       if (ws.readyState === WebSocket.OPEN) {
         ws.ping();
         pongTimeout = setTimeout(() => {
-          console.log(JSON.stringify({ level: 'warn', msg: 'pong_timeout', url }));
+          logger.warn('pong_timeout', { url });
           ws.terminate();
         }, PONG_TIMEOUT_MS);
       }
@@ -113,7 +116,7 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
           const msg: WsMessage = JSON.parse(data.toString());
           onMessage(msg);
         } catch {
-          console.log(JSON.stringify({ level: 'error', msg: 'invalid_ws_message' }));
+          logger.error('invalid_ws_message');
         }
       });
 

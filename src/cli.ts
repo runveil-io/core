@@ -6,6 +6,9 @@ import { DEFAULT_GATEWAY_PORT, DEFAULT_RELAY_PORT, OFFICIAL_RELAY_URL, MODEL_MAP
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
+import { Logger } from './logger.js';
+
+const logger = new Logger('cli');
 
 function getVeilHome(): string {
   return process.env['VEIL_HOME'] ?? join(process.env['HOME'] ?? '.', '.veil');
@@ -28,7 +31,7 @@ async function cmdInit(): Promise<void> {
   const force = process.argv.includes('--force');
 
   if (existsSync(join(home, 'wallet.json')) && !force) {
-    console.error('Already initialized. Use --force to reinitialize.');
+    logger.error('Already initialized. Use --force to reinitialize.');
     process.exit(1);
   }
 
@@ -37,12 +40,12 @@ async function cmdInit(): Promise<void> {
   try {
     const info = await createWallet(password, home);
     const pk = info.signingPublicKey;
-    console.log(`Veil initialized.`);
-    console.log(`Public key: ${pk.slice(0, 8)}...${pk.slice(-8)}`);
-    console.log(`Gateway:    http://localhost:${DEFAULT_GATEWAY_PORT}/v1`);
-    console.log(`Relay:      ${OFFICIAL_RELAY_URL}`);
+    logger.info(`Veil initialized.`);
+    logger.info(`Public key: ${pk.slice(0, 8)}...${pk.slice(-8)}`);
+    logger.info(`Gateway:    http://localhost:${DEFAULT_GATEWAY_PORT}/v1`);
+    logger.info(`Relay:      ${OFFICIAL_RELAY_URL}`);
   } catch (err) {
-    console.error((err as Error).message);
+    logger.error((err as Error).message);
     process.exit(1);
   }
 }
@@ -51,7 +54,7 @@ async function cmdProvideInit(): Promise<void> {
   const home = getVeilHome();
 
   if (!existsSync(join(home, 'wallet.json'))) {
-    console.error("Run 'veil init' first.");
+    logger.error("Run 'veil init' first.");
     process.exit(1);
   }
 
@@ -63,11 +66,11 @@ async function cmdProvideInit(): Promise<void> {
       headers: { 'x-api-key': apiKeyInput, 'anthropic-version': '2023-06-01' },
     });
     if (res.status === 401) {
-      console.error('Invalid API key.');
+      logger.error('Invalid API key.');
       process.exit(1);
     }
   } catch {
-    console.error('Cannot reach Anthropic API. Check network.');
+    logger.error('Cannot reach Anthropic API. Check network.');
     process.exit(1);
   }
 
@@ -76,7 +79,7 @@ async function cmdProvideInit(): Promise<void> {
   try {
     await loadWallet(password, home);
   } catch {
-    console.error('Wrong password.');
+    logger.error('Wrong password.');
     process.exit(1);
   }
 
@@ -93,9 +96,9 @@ async function cmdProvideInit(): Promise<void> {
 
   writeFileSync(join(home, 'provider.json'), JSON.stringify(providerConfig, null, 2), { mode: 0o600 });
 
-  console.log('Provider initialized.');
-  console.log(`Models: ${models.join(', ')}`);
-  console.log('Max concurrent: 5');
+  logger.info('Provider initialized.');
+  logger.info(`Models: ${models.join(', ')}`);
+  logger.info('Max concurrent: 5');
 }
 
 async function cmdProvideStart(): Promise<void> {
@@ -106,7 +109,7 @@ async function cmdProvideStart(): Promise<void> {
 
   const providerPath = join(home, 'provider.json');
   if (!existsSync(providerPath)) {
-    console.error("Run 'veil provide init' first.");
+    logger.error("Run 'veil provide init' first.");
     process.exit(1);
   }
 
@@ -136,7 +139,7 @@ async function cmdProvideStart(): Promise<void> {
   }
 
   if (apiKeys.length === 0) {
-    console.error('No API keys available.');
+    logger.error('No API keys available.');
     process.exit(1);
   }
 
@@ -150,13 +153,13 @@ async function cmdProvideStart(): Promise<void> {
     proxySecret: process.env.PROXY_SECRET,  // shared secret from proxy
   });
 
-  console.log('Provider online.');
-  console.log(`Models: ${providerConfig.models.join(', ')}`);
-  console.log(`Relay:  ${relayUrl}`);
-  console.log('Waiting for requests...');
+  logger.info('Provider online.');
+  logger.info(`Models: ${providerConfig.models.join(', ')}`);
+  logger.info(`Relay:  ${relayUrl}`);
+  logger.info('Waiting for requests...');
 
   process.on('SIGINT', async () => {
-    console.log('\nShutting down...');
+    logger.info('\nShutting down...');
     await provider.close();
     process.exit(0);
   });
@@ -179,12 +182,12 @@ async function cmdRelayStart(): Promise<void> {
 
   const relay = await startRelay({ port, wallet, dbPath });
 
-  console.log('Relay online.');
-  console.log(`Listening: ws://0.0.0.0:${port}`);
-  console.log('Providers: 0 connected');
+  logger.info('Relay online.');
+  logger.info(`Listening: ws://0.0.0.0:${port}`);
+  logger.info('Providers: 0 connected');
 
   process.on('SIGINT', async () => {
-    console.log('\nShutting down...');
+    logger.info('\nShutting down...');
     await relay.close();
     process.exit(0);
   });
@@ -199,7 +202,7 @@ async function cmdStatus(): Promise<void> {
   const configPath = join(home, 'config.json');
 
   if (!existsSync(configPath)) {
-    console.error("Not initialized. Run 'veil init'.");
+    logger.error("Not initialized. Run 'veil init'.");
     process.exit(1);
   }
 
@@ -236,12 +239,12 @@ async function cmdStatus(): Promise<void> {
   const providerPath = join(home, 'provider.json');
   const providerStatus = existsSync(providerPath) ? 'configured' : 'not configured';
 
-  console.log('Veil Status');
-  console.log('-----------');
-  console.log(`Public key:   ${pk.slice(0, 8)}...${pk.slice(-8)}`);
-  console.log(`Gateway:      http://localhost:${config.gateway_port} [${gatewayStatus}]`);
-  console.log(`Relay:        ${config.relay_url} [${relayStatus}]`);
-  console.log(`Provider:     [${providerStatus}]`);
+  logger.info('Veil Status');
+  logger.info('-----------');
+  logger.info(`Public key:   ${pk.slice(0, 8)}...${pk.slice(-8)}`);
+  logger.info(`Gateway:      http://localhost:${config.gateway_port} [${gatewayStatus}]`);
+  logger.info(`Relay:        ${config.relay_url} [${relayStatus}]`);
+  logger.info(`Provider:     [${providerStatus}]`);
 }
 
 async function main(): Promise<void> {
@@ -256,14 +259,14 @@ async function main(): Promise<void> {
       if (args[1] === 'init') await cmdProvideInit();
       else if (args[1] === 'start') await cmdProvideStart();
       else {
-        console.error('Usage: veil provide [init|start]');
+        logger.error('Usage: veil provide [init|start]');
         process.exit(1);
       }
       break;
     case 'relay':
       if (args[1] === 'start') await cmdRelayStart();
       else {
-        console.error('Usage: veil relay start [--port 8080]');
+        logger.error('Usage: veil relay start [--port 8080]');
         process.exit(1);
       }
       break;
@@ -271,19 +274,19 @@ async function main(): Promise<void> {
       await cmdStatus();
       break;
     default:
-      console.log('Usage: veil <command>');
-      console.log('');
-      console.log('Commands:');
-      console.log('  init            Initialize Veil wallet');
-      console.log('  provide init    Configure as Provider');
-      console.log('  provide start   Start Provider');
-      console.log('  relay start     Start Relay server');
-      console.log('  status          Check status');
+      logger.info('Usage: veil <command>');
+      logger.info('');
+      logger.info('Commands:');
+      logger.info('  init            Initialize Veil wallet');
+      logger.info('  provide init    Configure as Provider');
+      logger.info('  provide start   Start Provider');
+      logger.info('  relay start     Start Relay server');
+      logger.info('  status          Check status');
       break;
   }
 }
 
 main().catch((err) => {
-  console.error((err as Error).message);
+  logger.error((err as Error).message);
   process.exit(1);
 });

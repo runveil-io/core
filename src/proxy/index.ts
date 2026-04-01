@@ -15,10 +15,13 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { randomBytes } from 'node:crypto';
+import { Logger } from '../logger.js';
+
+const logger = new Logger('api_proxy');
 
 const API_KEY = process.env.ANTHROPIC_API_KEY;
 if (!API_KEY) {
-  console.error('ANTHROPIC_API_KEY environment variable required');
+  logger.error('ANTHROPIC_API_KEY environment variable required');
   process.exit(1);
 }
 
@@ -71,7 +74,7 @@ app.all('/v1/*', async (c) => {
 
     return c.json(await res.json(), res.status as any);
   } catch (err: any) {
-    console.error(JSON.stringify({ level: 'error', msg: 'upstream_error', error: err.message }));
+    logger.error('upstream_error', { error: err.message });
     return c.json({ error: { message: 'Upstream API unreachable', type: 'api_error' } }, 502);
   }
 });
@@ -86,7 +89,7 @@ app.get('/health', (c) => {
 });
 
 serve({ fetch: app.fetch, port: PROXY_PORT, hostname: '127.0.0.1' }, () => {
-  console.log(JSON.stringify({ level: 'info', msg: 'proxy_started', port: PROXY_PORT }));
+  logger.info('proxy_started', { port: PROXY_PORT });
   // Output secret so parent process can capture it
   // Only printed once at startup, not logged elsewhere
   console.log(`PROXY_SECRET=${PROXY_SECRET}`);
