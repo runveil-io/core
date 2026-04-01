@@ -1,5 +1,8 @@
 import type { Connection } from '../network/index.js';
 import { createServer } from '../network/index.js';
+import { createLogger } from '../logger.js';
+
+const log = createLogger('relay');
 import { initDatabase } from '../db.js';
 import { verify, sign, sha256, toHex, fromHex } from '../crypto/index.js';
 import { MAX_REQUEST_AGE_MS } from '../config/bootstrap.js';
@@ -17,6 +20,78 @@ export interface RelayOptions {
   port: number;
   wallet: Wallet;
   dbPath: string;
+  rateLimitOptions?: RateLimitOptions;
+}
+
+export interface RateLimitOptions {
+  windowMs: number;   // sliding window duration in milliseconds (default: 60_000)
+  maxRequests: number; // max requests per pubkey per window (default: 60)
+}
+
+// ─────────────────────────────────────────────
+//  SLIDING WINDOW RATE LIMITER
+// ─────────────────────────────────────────────
+
+/**
+ * In-memory sliding window rate limiter keyed by consumer pubkey.
+ * Tracks timestamps of recent requests and evicts those outside the window.
+ */
+export class SlidingWindowRateLimiter {
+  private readonly windowMs: number;
+  private readonly maxRequests: number;
+  // Map<pubkey, sorted list of request timestamps>
+  private readonly windows = new Map<string, number[]>();
+
+  constructor(windowMs: number, maxRequests: number) {
+    this.windowMs = windowMs;
+    this.maxRequests = maxRequests;
+  }
+
+  /**
+   * Check whether a request from `pubkey` is allowed.
+   * Evicts expired timestamps, then checks count against limit.
+   * Returns true if allowed, false if rate-limited.
+   */
+  isAllowed(pubkey: string): boolean {
+    const now = Date.now();
+    const cutoff = now - this.windowMs;
+
+    let timestamps = this.windows.get(pubkey);
+    if (!timestamps) {
+      timestamps = [];
+      this.windows.set(pubkey, timestamps);
+    }
+
+    // Evict timestamps outside the sliding window (in-place, from front)
+    let i = 0;
+    while (i < timestamps.length && timestamps[i] <= cutoff) {
+      i++;
+    }
+    if (i > 0) {
+      timestamps.splice(0, i);
+    }
+
+    if (timestamps.length >= this.maxRequests) {
+      return false;
+    }
+
+    timestamps.push(now);
+    return true;
+  }
+
+  /** Remove state for a pubkey (e.g. on disconnect). */
+  evict(pubkey: string): void {
+    this.windows.delete(pubkey);
+  }
+
+  /** Current request count within window for a pubkey (for logging/tests). */
+  count(pubkey: string): number {
+    const now = Date.now();
+    const cutoff = now - this.windowMs;
+    const timestamps = this.windows.get(pubkey);
+    if (!timestamps) return 0;
+    return timestamps.filter((t) => t > cutoff).length;
+  }
 }
 
 interface ConnectedProvider {
@@ -32,7 +107,7 @@ export function verifyRequest(
 ): boolean {
   const now = Date.now();
   if (Math.abs(now - timestamp) > MAX_REQUEST_AGE_MS) {
-    console.log(JSON.stringify({ level: 'debug', msg: 'verify_fail_timestamp', now, timestamp, diff: Math.abs(now - timestamp) }));
+    log.debug('verify_fail_timestamp', { now, timestamp, diff: Math.abs(now - timestamp) });
     return false;
   }
 
@@ -54,7 +129,7 @@ export function verifyRequest(
     fromHex(outer.consumer_pubkey),
   );
   if (!result) {
-    console.log(JSON.stringify({ level: 'debug', msg: 'verify_fail_signature', consumer: outer.consumer_pubkey.slice(0, 16) }));
+    log.debug('verify_fail_signature', { consumer: outer.consumer_pubkey.slice(0, 16) });
   }
   return result;
 }
@@ -114,8 +189,16 @@ export function createWitness(
   };
 }
 
+const DEFAULT_RATE_LIMIT: RateLimitOptions = {
+  windowMs: 60_000,
+  maxRequests: 60,
+};
+
 export async function startRelay(options: RelayOptions): Promise<{ close(): Promise<void> }> {
   const { port, wallet, dbPath } = options;
+  const rlOpts = options.rateLimitOptions ?? DEFAULT_RATE_LIMIT;
+  const rateLimiter = new SlidingWindowRateLimiter(rlOpts.windowMs, rlOpts.maxRequests);
+
   const db = initDatabase(dbPath);
   const providers = new Map<string, ConnectedProvider>();
   const consumers = new Map<string, Connection>(); // request_id -> consumer conn
@@ -191,13 +274,31 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
       timestamp: Date.now(),
     });
 
-    console.log(JSON.stringify({ level: 'info', msg: 'provider_registered', id: payload.provider_pubkey.slice(0, 16) }));
+    log.info('provider_registered', { id: payload.provider_pubkey.slice(0, 16) });
   }
 
   function handleConsumerRequest(conn: Connection, msg: WsMessage): void {
    try {
     const payload = msg.payload as RequestPayload;
     const requestId = msg.request_id!;
+    const consumerPubkey = payload.outer.consumer_pubkey;
+
+    // Rate limit check — sliding window per consumer pubkey
+    if (!rateLimiter.isAllowed(consumerPubkey)) {
+      log.warn('rate_limit_exceeded', {
+        consumer: consumerPubkey.slice(0, 16),
+        count: rateLimiter.count(consumerPubkey),
+        windowMs: rlOpts.windowMs,
+        maxRequests: rlOpts.maxRequests,
+      });
+      conn.send({
+        type: 'error',
+        request_id: requestId,
+        payload: { code: 'rate_limited', message: 'Too many requests. Please slow down.' },
+        timestamp: Date.now(),
+      });
+      return;
+    }
 
     // Verify signature
     if (!verifyRequest(payload.outer, requestId, msg.timestamp, payload.inner)) {
@@ -225,7 +326,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
     // Store mapping for response routing
     consumers.set(requestId, conn);
     requestMeta.set(requestId, {
-      consumerPubkey: payload.outer.consumer_pubkey,
+      consumerPubkey,
       providerId: payload.outer.provider_id,
       model: payload.outer.model,
     });
@@ -246,7 +347,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
     provider.conn.send(forwardMsg);
    } catch (err: any) {
-    console.log(JSON.stringify({ level: 'error', msg: 'consumer_request_error', error: err.message, stack: err.stack?.split('\n').slice(0, 3) }));
+    log.error('consumer_request_error', { error: err.message });
     const requestId = msg.request_id;
     if (requestId) {
       conn.send({ type: 'error', request_id: requestId, payload: { code: 'api_error', message: err.message }, timestamp: Date.now() });
@@ -317,7 +418,8 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
       conn.ws.on('message', (data) => {
         try {
-          const msg: WsMessage = JSON.parse(data.toString()); console.log(JSON.stringify({level:"debug",msg:"relay_recv",type:msg.type,req_id:msg.request_id?.slice(0,8)}));
+          const msg: WsMessage = JSON.parse(data.toString());
+          log.debug('relay_recv', { type: msg.type, req_id: msg.request_id?.slice(0, 8) });
 
           switch (msg.type) {
             case 'provider_hello':
@@ -350,7 +452,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
               break;
           }
         } catch {
-          console.log(JSON.stringify({ level: 'error', msg: 'relay_message_parse_error' }));
+          log.error('relay_message_parse_error');
         }
       });
 
@@ -358,13 +460,13 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
         if (isProvider && providerId) {
           providers.delete(providerId);
           try { removeProvider.run(providerId); } catch { /* db may be closed */ }
-          console.log(JSON.stringify({ level: 'info', msg: 'provider_disconnected', id: providerId.slice(0, 16) }));
+          log.info('provider_disconnected', { id: providerId.slice(0, 16) });
         }
       });
     },
   });
 
-  console.log(JSON.stringify({ level: 'info', msg: 'relay_started', port: server.port }));
+  log.info('relay_started', { port: server.port });
 
   return {
     async close(): Promise<void> {
