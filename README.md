@@ -13,6 +13,23 @@ $ clawd build           # Contribute code, earn future revenue
 
 ---
 
+## Why Veil?
+
+**Your API quota ran out mid-task?** Switch to Veil. Use someone else's idle capacity. Keep working.
+
+```
+Direct:  Your App → Your API Key → Anthropic (quota exceeded ❌)
+Veil:    Your App → localhost:4000 → Relay → Provider's API → Anthropic ✅
+```
+
+Veil runs as a local gateway on port 4000. Your tools (Cursor, OpenClaw, any OpenAI-compatible client) don't know the difference. You pay per token with crypto — cheaper than buying another subscription.
+
+**Your subscription is idle 90% of the time?** Share it. Earn USDC while you sleep.
+
+**You need AI but don't want an account?** Veil is anonymous. No KYC. No tracking. The relay sees who sent a request but can't read it. The provider processes the request but doesn't know who sent it.
+
+---
+
 ## What is Veil?
 
 Veil is a decentralized network for AI inference. Three roles:
