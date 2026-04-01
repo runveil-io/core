@@ -78,7 +78,7 @@ describe('provider', () => {
     expect(result.content).toBe('Hello from mock!');
     expect(result.usage.input_tokens).toBe(10);
     expect(result.usage.output_tokens).toBe(5);
-    expect(result.finish_reason).toBe('stop');
+    expect(result.finish_reason).toBe('end_turn');
   });
 
   it('handleRequest streaming with mock Anthropic', async () => {
@@ -101,6 +101,25 @@ describe('provider', () => {
     expect(chunks).toContain(' world');
     expect(result.content).toBe('Hello world');
     expect(result.usage.output_tokens).toBe(5);
+  });
+
+  it('handleRequest should be cancellable via AbortSignal', async () => {
+    const inner: InnerPlaintext = {
+      messages: [{ role: 'user', content: 'hello' }],
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 100,
+      temperature: 1,
+      top_p: 1,
+      stop_sequences: [],
+      stream: false,
+    };
+
+    const controller = new AbortController();
+    const promise = handleRequest(inner, 'test-key', undefined, `http://localhost:${mockPort}`, undefined, controller.signal);
+    
+    controller.abort();
+
+    await expect(promise).rejects.toThrow();
   });
 
   it('handleRequest with decrypt error scenario', async () => {

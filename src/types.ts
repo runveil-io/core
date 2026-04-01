@@ -11,6 +11,7 @@ export type MessageType =
   | 'error'
   | 'ping'
   | 'pong'
+  | 'cancel'
   | 'list_providers'
   | 'provider_list';
 

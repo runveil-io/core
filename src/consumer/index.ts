@@ -294,6 +294,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
     if (body.stream) {
       // Streaming response
       const created = Math.floor(Date.now() / 1000);
+      let currentRequestId: string | null = null;
       const stream = new ReadableStream({
         async start(controller) {
           const encoder = new TextEncoder();
@@ -313,6 +314,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
             }
 
             const requestId = 'veil-' + nanoid(24);
+            currentRequestId = requestId;
             let wsMsg: WsMessage;
             try {
               wsMsg = buildRequest(requestId, body, provider);
@@ -396,6 +398,16 @@ export async function startGateway(options: GatewayOptions): Promise<{
             }
           }
         },
+        cancel() {
+          if (currentRequestId && relayConn) {
+            log.info('client_stream_cancelled', { request_id: currentRequestId });
+            relayConn.send({
+              type: 'cancel',
+              request_id: currentRequestId,
+              timestamp: Date.now(),
+            });
+          }
+        },
       });
 
       return new Response(stream, {
@@ -410,6 +422,18 @@ export async function startGateway(options: GatewayOptions): Promise<{
       return new Promise<Response>(async (httpResolve) => {
         let attempts = 0;
         const excludeIds: string[] = [];
+        let currentRequestId: string | null = null;
+
+        c.req.raw.signal.addEventListener('abort', () => {
+          if (currentRequestId && relayConn) {
+            log.info('client_request_cancelled', { request_id: currentRequestId });
+            relayConn.send({
+              type: 'cancel',
+              request_id: currentRequestId,
+              timestamp: Date.now(),
+            });
+          }
+        });
 
         while (attempts <= 3) {
           const provider = selectProvider(body.model, excludeIds);
@@ -421,6 +445,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
           }
 
           const requestId = 'veil-' + nanoid(24);
+          currentRequestId = requestId;
           let wsMsg: WsMessage;
           try {
             wsMsg = buildRequest(requestId, body, provider);

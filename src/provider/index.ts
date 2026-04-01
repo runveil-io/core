@@ -53,6 +53,7 @@ export async function handleRequest(
   onChunk?: (chunk: string) => void,
   apiBase?: string,
   proxySecret?: string,
+  signal?: AbortSignal,
 ): Promise<HandleRequestResult> {
   const anthropicModel = MODEL_MAP[inner.model] ?? inner.model;
 
@@ -94,277 +95,224 @@ export async function handleRequest(
     headers['x-app'] = 'cli';
     headers['accept'] = 'application/json';
   } else {
-    // Standard API key
     headers['x-api-key'] = apiKey;
   }
-  
-  // OAuth tokens require Claude Code system prompt
-  if (isOAuthToken && !anthropicRequest.system) {
-    anthropicRequest.system = [{ type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." }];
-  } else if (isOAuthToken && typeof anthropicRequest.system === 'string') {
-    anthropicRequest.system = [
-      { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
-      { type: 'text', text: anthropicRequest.system },
-    ];
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(anthropicRequest),
+    signal,
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    log.error('anthropic_error', { status: res.status, body: errorText });
+    if (res.status === 401) throw new Error('upstream_auth:Unauthorized');
+    throw new Error(`anthropic_${res.status}:${errorText}`);
   }
 
-  let lastError: Error | null = null;
-  for (let attempt = 0; attempt <= RETRY_CONFIG.maxRetries; attempt++) {
-    if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, getRetryDelay(attempt - 1)));
-    }
-
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(anthropicRequest),
-      });
-    } catch (err) {
-      lastError = err as Error;
-      continue;
-    }
-
-    log.debug('anthropic_status', { status: res.status });
-    if (res.status === 429 || res.status === 529 || res.status === 500) {
-      lastError = new Error(`anthropic_${res.status}`);
-      if (attempt < RETRY_CONFIG.maxRetries) continue;
-      throw lastError;
-    }
-
-    if (res.status === 400) {
-      const errBody = await res.text(); log.debug('anthropic_400', { body: errBody }); const body = JSON.parse(errBody) as { error?: { message?: string } };
-      throw new Error(body.error?.message ?? 'invalid_request');
-    }
-
-    if (res.status === 401) {
-      throw new Error('upstream_auth');
-    }
-
-    if (!inner.stream) {
-      const body = await res.json() as {
-        content: Array<{ text: string }>;
-        usage: { input_tokens: number; output_tokens: number };
-        stop_reason: string;
-      };
-      return {
-        content: body.content.map((c) => c.text).join(''),
-        usage: body.usage,
-        finish_reason: body.stop_reason === 'end_turn' ? 'stop' : body.stop_reason === 'max_tokens' ? 'length' : 'stop',
-      };
-    }
-
-    // Streaming
-    if (!res.body) throw new Error('no_response_body');
-    const reader = res.body.getReader();
+  if (inner.stream) {
+    const reader = res.body!.getReader();
     const decoder = new TextDecoder();
     let content = '';
     let inputTokens = 0;
     let outputTokens = 0;
     let finishReason = 'stop';
-    let buffer = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
 
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6).trim();
-        if (!data) continue;
-
-        let event: { type: string; message?: { usage?: { input_tokens: number } }; delta?: { type?: string; text?: string; stop_reason?: string }; usage?: { output_tokens: number } };
-        try {
-          event = JSON.parse(data);
-        } catch {
-          continue;
-        }
-
-        switch (event.type) {
-          case 'message_start':
-            inputTokens = event.message?.usage?.input_tokens ?? 0;
-            break;
-          case 'content_block_delta':
-            if (event.delta?.type === 'text_delta' && event.delta.text) {
-              content += event.delta.text;
-              onChunk?.(event.delta.text);
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6);
+            if (data === '[DONE]') break;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.type === 'content_block_delta' && parsed.delta.type === 'text_delta') {
+                const text = parsed.delta.text;
+                content += text;
+                onChunk?.(text);
+              } else if (parsed.type === 'message_start') {
+                inputTokens = parsed.message.usage.input_tokens;
+              } else if (parsed.type === 'message_delta') {
+                outputTokens = parsed.usage.output_tokens;
+                if (parsed.delta.finish_reason) {
+                   finishReason = parsed.delta.finish_reason;
+                }
+              }
+            } catch {
+              // Ignore partial JSON
             }
-            break;
-          case 'message_delta':
-            outputTokens = event.usage?.output_tokens ?? 0;
-            if (event.delta?.stop_reason === 'end_turn') finishReason = 'stop';
-            else if (event.delta?.stop_reason === 'max_tokens') finishReason = 'length';
-            break;
+          }
         }
       }
+    } finally {
+      reader.releaseLock();
     }
 
-    return { content, usage: { input_tokens: inputTokens, output_tokens: outputTokens }, finish_reason: finishReason };
+    return {
+      content,
+      usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+      finish_reason: finishReason,
+    };
+  } else {
+    const result = await res.json() as any;
+    return {
+      content: result.content[0].text,
+      usage: {
+        input_tokens: result.usage.input_tokens,
+        output_tokens: result.usage.output_tokens,
+      },
+      finish_reason: result.stop_reason,
+    };
   }
-
-  throw lastError ?? new Error('max_retries_exceeded');
 }
 
 export async function startProvider(options: ProviderOptions): Promise<{ close(): Promise<void> }> {
-  const { wallet, relayUrl, apiKeys, maxConcurrent, proxyUrl, proxySecret, discoveryClient } = options;
-  const apiKey = proxyUrl ? 'proxy' : apiKeys.find((k) => k.provider === 'anthropic')?.key;
-  if (!apiKey && !proxyUrl) throw new Error('No Anthropic API key or proxy configured');
-  const apiBase = proxyUrl ?? undefined;
-
+  const { wallet, relayUrl, apiKeys, maxConcurrent, proxyUrl, proxySecret } = options;
   let activeRequests = 0;
   const metrics = new MetricsStore();
-  const extraConnections: Connection[] = [];
+  const activeControllers = new Map<string, AbortController>();
 
   const conn = await connect({
     url: relayUrl,
     onMessage(msg: WsMessage) {
-      if (msg.type === 'provider_ack') {
-        const payload = msg.payload as { status: string; reason?: string };
-        if (payload.status === 'rejected') {
-          log.error('provider_rejected', { reason: payload.reason });
-        } else {
-          log.info('provider_accepted');
-        }
-        return;
-      }
+      log.debug('provider_recv', { type: msg.type, req_id: msg.request_id?.slice(0, 8) });
 
-      if (msg.type === 'request') {
-        if (activeRequests >= maxConcurrent) {
-          conn.send({
-            type: 'error',
-            request_id: msg.request_id,
-            payload: { code: 'rate_limit', message: 'Provider at capacity' },
-            timestamp: Date.now(),
+      switch (msg.type) {
+        case 'provider_ack':
+          log.info('provider_ack', msg.payload);
+          break;
+
+        case 'request':
+          handleProviderRequest(conn, msg).catch((err) => {
+            log.error('handle_request_fatal', { error: err.message });
           });
-          return;
-        }
-        handleIncomingRequest(msg).catch((err) => {
-          log.error('request_error', { error: (err as Error).message });
-        });
-      }
+          break;
+        
+        case 'cancel':
+          if (msg.request_id) {
+            const controller = activeControllers.get(msg.request_id);
+            if (controller) {
+              controller.abort();
+              activeControllers.delete(msg.request_id);
+              log.info('provider_cancel_handled', { req_id: msg.request_id.slice(0, 8) });
+            }
+          }
+          break;
 
-      if (msg.type === 'pong') return;
+        case 'pong':
+          break;
+
+        default:
+          break;
+      }
     },
-    onClose(code, reason) {
-      log.warn('relay_disconnected', { code, reason });
-    },
-    onError(err) {
-      log.error('relay_error', { error: err.message });
-    },
+    reconnect: true,
   });
 
-  // Send provider_hello
-  function sendProviderHello(c: Connection): void {
-    const models = Object.keys(MODEL_MAP);
-    const helloPayload = {
-      provider_pubkey: toHex(wallet.signingPublicKey),
-      encryption_pubkey: toHex(wallet.encryptionPublicKey),
-      models,
-      capacity: 100,
-    };
-    const ts = Date.now();
-    const signable = JSON.stringify({ ...helloPayload, timestamp: ts });
-    const sig = sign(new TextEncoder().encode(signable), wallet.signingSecretKey);
-    c.send({
-      type: 'provider_hello',
-      payload: { ...helloPayload, signature: toHex(sig) },
-      timestamp: ts,
-    });
-  }
-
-  sendProviderHello(conn);
-
-  // If discovery client is available, connect to additional relays for wider reachability
-  if (discoveryClient) {
-    try {
-      const relays = await discoveryClient.fetchRelays();
-      const additionalRelays = relays
-        .filter((r) => r.endpoint !== relayUrl && r.capacity > 0)
-        .slice(0, MULTI_RELAY_COUNT - 1);
-
-      for (const relay of additionalRelays) {
-        try {
-          const extraConn = await connect({
-            url: relay.endpoint,
-            onMessage(msg: WsMessage) {
-              if (msg.type === 'provider_ack') {
-                const payload = msg.payload as { status: string; reason?: string };
-                if (payload.status === 'rejected') {
-                  log.error('extra_relay_rejected', { relay: relay.relay_id, reason: payload.reason });
-                } else {
-                  log.info('extra_relay_accepted', { relay: relay.relay_id });
-                }
-                return;
+  const extraConnections: Connection[] = [];
+  if (options.discoveryClient) {
+    const relays = await options.discoveryClient.selectRelay([], MULTI_RELAY_COUNT);
+    for (const r of relays) {
+      if (r.relay.endpoint === relayUrl) continue;
+      try {
+        const ec = await connect({
+          url: r.relay.endpoint,
+          onMessage(msg: WsMessage) {
+            if (msg.type === 'request') {
+              handleProviderRequest(ec, msg).catch(() => {});
+            } else if (msg.type === 'cancel') {
+              if (msg.request_id) {
+                 activeControllers.get(msg.request_id)?.abort();
+                 activeControllers.delete(msg.request_id);
               }
-              if (msg.type === 'request') {
-                if (activeRequests >= maxConcurrent) {
-                  extraConn.send({
-                    type: 'error',
-                    request_id: msg.request_id,
-                    payload: { code: 'rate_limit', message: 'Provider at capacity' },
-                    timestamp: Date.now(),
-                  });
-                  return;
-                }
-                handleIncomingRequest(msg).catch((err) => {
-                  log.error('request_error', { error: (err as Error).message });
-                });
-              }
-            },
-            onClose(_code, _reason) {
-              log.warn('extra_relay_disconnected', { relay: relay.relay_id });
-            },
-            onError(err) {
-              log.error('extra_relay_error', { relay: relay.relay_id, error: err.message });
-            },
-          });
-          sendProviderHello(extraConn);
-          extraConnections.push(extraConn);
-          log.info('extra_relay_connected', { relay: relay.relay_id, endpoint: relay.endpoint });
-        } catch (err) {
-          log.warn('extra_relay_connect_failed', { relay: relay.relay_id, error: (err as Error).message });
-        }
+            }
+          },
+          reconnect: true,
+        });
+        extraConnections.push(ec);
+        log.info('multi_relay_connected', { url: r.relay.endpoint });
+      } catch (err) {
+        log.warn('multi_relay_connect_failed', { url: r.relay.endpoint, error: (err as Error).message });
       }
-    } catch (err) {
-      log.warn('discovery_multi_relay_failed', { error: (err as Error).message });
     }
   }
 
-  async function handleIncomingRequest(msg: WsMessage): Promise<void> {
+  // Initial hello
+  function sendHello(c: Connection) {
+    c.send({
+      type: 'provider_hello',
+      payload: {
+        provider_pubkey: toHex(wallet.signingPublicKey),
+        encryption_pubkey: toHex(wallet.encryptionPublicKey),
+        models: Object.keys(MODEL_MAP),
+        capacity: maxConcurrent,
+        signature: toHex(
+          sign(
+            new TextEncoder().encode(
+              JSON.stringify({
+                provider_pubkey: toHex(wallet.signingPublicKey),
+                encryption_pubkey: toHex(wallet.encryptionPublicKey),
+                models: Object.keys(MODEL_MAP),
+                capacity: maxConcurrent,
+                timestamp: Date.now(),
+              }),
+            ),
+            wallet.signingSecretKey,
+          ),
+        ),
+      },
+      timestamp: Date.now(),
+    });
+  }
+
+  sendHello(conn);
+  for (const ec of extraConnections) sendHello(ec);
+
+  async function handleProviderRequest(conn: Connection, msg: WsMessage): Promise<void> {
+    const requestId = msg.request_id!;
+    const payload = msg.payload as RequestPayload;
     const requestStart = Date.now();
     let isError = false;
     let modelName = 'unknown';
 
+    if (activeRequests >= maxConcurrent) {
+      conn.send({
+        type: 'error',
+        request_id: requestId,
+        payload: { code: 'rate_limit', message: 'Provider at capacity' },
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
     activeRequests++;
-    const requestId = msg.request_id!;
+    const controller = new AbortController();
+    activeControllers.set(requestId, controller);
+
     try {
-      const payload = msg.payload as RequestPayload;
-      const innerBytes = Buffer.from(payload.inner, 'base64');
+      const decrypted = open(
+        new Uint8Array(Buffer.from(payload.inner, 'base64')),
+        wallet.encryptionSecretKey,
+      );
+      if (!decrypted) throw new Error('decrypt_failed');
 
-      // Decrypt inner envelope
-      const plaintext = open(new Uint8Array(innerBytes), wallet.encryptionSecretKey);
-      if (!plaintext) {
-        conn.send({
-          type: 'error',
-          request_id: requestId,
-          payload: { code: 'decrypt_failed', message: 'Failed to decrypt request' },
-          timestamp: Date.now(),
-        });
-        return;
-      }
+      const inner = JSON.parse(new TextDecoder().decode(decrypted)) as InnerPlaintext;
+      modelName = inner.model;
+      const consumerEncPubkey = fromHex(payload.outer.encryption_pubkey);
 
-      // Extract consumer encryption pubkey for response encryption
-      const consumerEncPubkey = innerBytes.slice(0, 32);
-      const inner: InnerPlaintext = JSON.parse(new TextDecoder().decode(plaintext));
-      modelName = inner.model || 'unknown';
+      const apiKey = apiKeys.find((k) => k.provider === 'anthropic')?.key;
+      const apiBase = proxyUrl;
 
       if (inner.stream) {
-        // Streaming mode
+        // Send stream_start
         conn.send({
           type: 'stream_start',
           request_id: requestId,
@@ -372,27 +320,10 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
           timestamp: Date.now(),
         });
 
-        // Send first chunk with role
-        const roleChunk = JSON.stringify({ role: 'assistant' });
-        const sealedRole = seal(
-          new TextEncoder().encode(roleChunk),
-          new Uint8Array(consumerEncPubkey),
-          wallet.encryptionSecretKey,
-        );
-        conn.send({
-          type: 'stream_chunk',
-          request_id: requestId,
-          payload: {
-            encrypted_chunk: Buffer.from(sealedRole).toString('base64'),
-            index: 0,
-          } satisfies import('../types.js').StreamChunkPayload,
-          timestamp: Date.now(),
-        });
-
-        let chunkIndex = 1;
-        const result = await handleRequest(inner, apiKey!, (text) => {
-          const sealed = seal(
-            new TextEncoder().encode(text),
+        let chunkIndex = 0;
+        const result = await handleRequest(inner, apiKey!, (chunk) => {
+          const sealedChunk = seal(
+            new TextEncoder().encode(chunk),
             new Uint8Array(consumerEncPubkey),
             wallet.encryptionSecretKey,
           );
@@ -400,14 +331,14 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
             type: 'stream_chunk',
             request_id: requestId,
             payload: {
-              encrypted_chunk: Buffer.from(sealed).toString('base64'),
+              encrypted_chunk: Buffer.from(sealedChunk).toString('base64'),
               index: chunkIndex++,
             } satisfies StreamChunkPayload,
             timestamp: Date.now(),
           });
-        }, apiBase, proxySecret);
+        }, apiBase, proxySecret, controller.signal);
 
-        // Send finish_reason chunk
+        // Final chunk for finish_reason
         const finishChunk = JSON.stringify({ finish_reason: result.finish_reason });
         const sealedFinish = seal(
           new TextEncoder().encode(finishChunk),
@@ -432,7 +363,7 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
         });
       } else {
         // Non-streaming mode
-        const result = await handleRequest(inner, apiKey!, undefined, apiBase, proxySecret);
+        const result = await handleRequest(inner, apiKey!, undefined, apiBase, proxySecret, controller.signal);
         const responseBody = JSON.stringify({
           content: result.content,
           usage: result.usage,
@@ -450,7 +381,11 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
           timestamp: Date.now(),
         });
       }
-    } catch (err) {
+    } catch (err: any) {
+      if (err.name === 'AbortError') {
+        log.info('request_abort_confirmed', { req_id: requestId.slice(0, 8) });
+        return; // No need to send error back if it was explicitly cancelled
+      }
       isError = true;
       const message = (err as Error).message;
       log.error('provider_request_error', { error: message });
@@ -465,6 +400,7 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
         timestamp: Date.now(),
       });
     } finally {
+      activeControllers.delete(requestId);
       const latencyMs = Date.now() - requestStart;
       metrics.recordRequest(modelName, latencyMs, isError);
       activeRequests--;

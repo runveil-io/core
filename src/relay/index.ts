@@ -320,6 +320,21 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
     }
   }
 
+  function handleCancel(msg: WsMessage): void {
+    const requestId = msg.request_id!;
+    const meta = requestMeta.get(requestId);
+    if (!meta) return;
+
+    const provider = providers.get(meta.providerId);
+    if (provider && provider.conn.readyState === 'open') {
+      provider.conn.send(msg);
+      log.info('relay_cancel_forwarded', { req_id: requestId.slice(0, 8), provider: meta.providerId.slice(0, 16) });
+    }
+    
+    consumers.delete(requestId);
+    requestMeta.delete(requestId);
+  }
+
   function handleListProviders(conn: Connection): void {
     const providerList = Array.from(providers.values()).map((p) => p.info);
     conn.send({
@@ -349,6 +364,10 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
             case 'request':
               handleConsumerRequest(conn, msg);
+              break;
+
+            case 'cancel':
+              handleCancel(msg);
               break;
 
             case 'response':
