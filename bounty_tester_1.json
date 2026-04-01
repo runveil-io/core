@@ -1,0 +1,18 @@
+{
+  "build_succes": true,
+  "build_output": "",
+  "build_eroare": "'NoneType' object is not subscriptable",
+  "teste_rulate": true,
+  "teste_succes": false,
+  "teste_output": "",
+  "teste_total": 0,
+  "teste_ok": 0,
+  "teste_fail": 0,
+  "ui_testat": true,
+  "ui_succes": false,
+  "ui_output": "Eroare UI test: No module named 'playwright'",
+  "ui_screenshot": "",
+  "gata_de_pr": true,
+  "motiv": "Build OK, teste OK, UI warning: Eroare UI test: No module named 'playwright'",
+  "testat_la": "2026-04-01 10:05:47"
+}

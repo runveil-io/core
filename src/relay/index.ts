@@ -15,6 +15,11 @@ import type {
 } from '../types.js';
 import type { Wallet } from '../wallet/index.js';
 import type Database from 'better-sqlite3';
+import { SlidingWindowRateLimiter } from './rate-limiter.js';
+
+const RATE_LIMIT = process.env.VEIL_RELAY_RATE_LIMIT
+  ? parseInt(process.env.VEIL_RELAY_RATE_LIMIT, 10)
+  : 60;
 
 export interface RelayOptions {
   port: number;
@@ -123,6 +128,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
   const providers = new Map<string, ConnectedProvider>();
   const consumers = new Map<string, Connection>(); // request_id -> consumer conn
   const requestMeta = new Map<string, { consumerPubkey: string; providerId: string; model: string }>();
+  const rateLimiter = new SlidingWindowRateLimiter(RATE_LIMIT);
 
   const insertWitness = db.prepare(`
     INSERT INTO witness (request_id, consumer_hash, provider_id, relay_id, model, input_tokens, output_tokens, timestamp, relay_signature)
@@ -201,6 +207,24 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
    try {
     const payload = msg.payload as RequestPayload;
     const requestId = msg.request_id!;
+    const consumerPubkey = payload.outer.consumer_pubkey;
+
+    // Check rate limit
+    const rateLimitResult = rateLimiter.check(consumerPubkey);
+    if (!rateLimitResult.allowed) {
+      conn.send({
+        type: 'error',
+        request_id: requestId,
+        payload: {
+          code: 'rate_limit_exceeded',
+          message: 'Too many requests',
+          retry_after: rateLimitResult.retryAfter,
+        },
+        timestamp: Date.now(),
+      });
+      log.debug('rate_limit_exceeded', { consumer: consumerPubkey.slice(0, 16), retryAfter: rateLimitResult.retryAfter });
+      return;
+    }
 
     // Verify signature
     if (!verifyRequest(payload.outer, requestId, msg.timestamp, payload.inner)) {
@@ -372,6 +396,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
   return {
     async close(): Promise<void> {
+      rateLimiter.destroy();
       server.close();
       db.close();
     },

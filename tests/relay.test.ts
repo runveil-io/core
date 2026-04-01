@@ -14,6 +14,7 @@ import {
 } from '../src/crypto/index.js';
 import type { WsMessage, ProviderHelloPayload, RequestPayload } from '../src/types.js';
 import Database from 'better-sqlite3';
+import { SlidingWindowRateLimiter } from '../src/relay/rate-limiter.js';
 
 describe('relay', () => {
   let tempDir: string;
@@ -40,8 +41,6 @@ describe('relay', () => {
       wallet: relayWallet,
       dbPath: join(tempDir, 'relay.db'),
     });
-    // Hacky: get actual port from db path area or we need to expose it
-    // We'll read from the createServer return. Let's use a known-free port approach.
   });
 
   afterEach(async () => {
@@ -51,11 +50,7 @@ describe('relay', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  // For these tests we need the relay port. Let's refactor to use a direct approach.
-  // Since startRelay doesn't expose port, we'll test the components directly.
-
   it('provider hello + ack flow', async () => {
-    // Use a fresh relay with known port
     if (relay) await relay.close();
 
     const relayWallet = makeWallet();
@@ -79,7 +74,6 @@ describe('relay', () => {
     });
     closables.push(conn);
 
-    // Send provider_hello
     const payload = {
       provider_pubkey: toHex(providerWallet.signingPublicKey),
       encryption_pubkey: toHex(providerWallet.encryptionPublicKey),
@@ -118,7 +112,6 @@ describe('relay', () => {
     const consumerWallet = makeWallet();
     const providerMessages: WsMessage[] = [];
 
-    // Connect provider
     const providerConn = await connect({
       url: `ws://localhost:${relayPort}`,
       onMessage(msg) { providerMessages.push(msg); },
@@ -129,7 +122,6 @@ describe('relay', () => {
     });
     closables.push(providerConn);
 
-    // Register provider
     const helloPayload = {
       provider_pubkey: toHex(providerWallet.signingPublicKey),
       encryption_pubkey: toHex(providerWallet.encryptionPublicKey),
@@ -149,7 +141,6 @@ describe('relay', () => {
 
     await new Promise((r) => setTimeout(r, 300));
 
-    // Connect consumer
     const consumerConn = await connect({
       url: `ws://localhost:${relayPort}`,
       onMessage() {},
@@ -160,7 +151,6 @@ describe('relay', () => {
     });
     closables.push(consumerConn);
 
-    // Build and send request
     const innerPlaintext = JSON.stringify({
       messages: [{ role: 'user', content: 'hello' }],
       model: 'claude-sonnet-4-20250514',
@@ -246,7 +236,7 @@ describe('relay', () => {
           consumer_pubkey: toHex(consumerWallet.signingPublicKey),
           provider_id: toHex(wrongWallet.signingPublicKey),
           model: 'claude-sonnet-4-20250514',
-          signature: toHex(new Uint8Array(64)), // Zeroed signature
+          signature: toHex(new Uint8Array(64)),
         },
         inner: Buffer.from('fake').toString('base64'),
       },
@@ -282,7 +272,7 @@ describe('relay', () => {
 
   it('stale request (timestamp > 5min old) rejected', () => {
     const wallet = makeWallet();
-    const staleTimestamp = Date.now() - 6 * 60 * 1000; // 6 minutes ago
+    const staleTimestamp = Date.now() - 6 * 60 * 1000;
 
     const innerPlaintext = 'test';
     const innerBase64 = Buffer.from(innerPlaintext).toString('base64');
@@ -312,5 +302,78 @@ describe('relay', () => {
     );
 
     expect(valid).toBe(false);
+  });
+});
+
+describe('SlidingWindowRateLimiter', () => {
+  it('allows requests under the limit', () => {
+    const limiter = new SlidingWindowRateLimiter(5);
+    const pubkey = 'pubkey-under-limit';
+
+    for (let i = 0; i < 5; i++) {
+      const result = limiter.check(pubkey);
+      expect(result.allowed).toBe(true);
+    }
+  });
+
+  it('blocks requests over the limit and returns 429 info', () => {
+    const limiter = new SlidingWindowRateLimiter(5);
+    const pubkey = 'pubkey-over-limit';
+
+    for (let i = 0; i < 5; i++) {
+      limiter.check(pubkey);
+    }
+
+    const result = limiter.check(pubkey);
+    expect(result.allowed).toBe(false);
+    expect(result.retryAfter).toBeGreaterThan(0);
+  });
+
+  it('sliding window resets after 1 minute', () => {
+    const limiter = new SlidingWindowRateLimiter(3);
+    const pubkey = 'pubkey-window-reset';
+
+    const now = Date.now();
+
+    for (let i = 0; i < 3; i++) {
+      limiter.check(pubkey);
+    }
+
+    const overLimit = limiter.check(pubkey);
+    expect(overLimit.allowed).toBe(false);
+
+    limiter.injectTimestamps(pubkey, [now - 61000, now - 62000, now - 63000]);
+
+    const afterReset = limiter.check(pubkey);
+    expect(afterReset.allowed).toBe(true);
+  });
+
+  it('Retry-After header value is correct', () => {
+    const limiter = new SlidingWindowRateLimiter(2);
+    const pubkey = 'pubkey-retry-after';
+
+    limiter.check(pubkey);
+    limiter.check(pubkey);
+
+    const result = limiter.check(pubkey);
+    expect(result.allowed).toBe(false);
+    expect(typeof result.retryAfter).toBe('number');
+    expect(result.retryAfter).toBeGreaterThan(0);
+    expect(result.retryAfter).toBeLessThanOrEqual(60);
+  });
+
+  it('tracks different pubkeys independently', () => {
+    const limiter = new SlidingWindowRateLimiter(2);
+    const pubkey1 = 'pubkey-a';
+    const pubkey2 = 'pubkey-b';
+
+    limiter.check(pubkey1);
+    limiter.check(pubkey1);
+
+    const blocked = limiter.check(pubkey1);
+    expect(blocked.allowed).toBe(false);
+
+    const allowed = limiter.check(pubkey2);
+    expect(allowed.allowed).toBe(true);
   });
 });

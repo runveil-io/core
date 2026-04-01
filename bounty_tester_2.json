@@ -1,0 +1,18 @@
+{
+  "build_succes": true,
+  "build_output": "",
+  "build_eroare": "'NoneType' object is not subscriptable",
+  "teste_rulate": true,
+  "teste_succes": true,
+  "teste_output": "\n\u001b[1m\u001b[7m\u001b[36m RUN \u001b[39m\u001b[27m\u001b[22m \u001b[36mv2.1.9 \u001b[39m\u001b[90mC:/Users/danis/bounties/runveil-io__core__20260401\u001b[39m\n\n \u001b[32mâœ“\u001b[39m tests/crypto.test.ts \u001b[2m(\u001b[22m\u001b[2m8 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[90m 136\u001b[2mms\u001b[22m\u001b[39m\n\u001b[90mstdout\u001b[2m | tests/provider.test.ts\u001b[2m > \u001b[22m\u001b[2mprovider\u001b[2m > \u001b[22m\u001b[2mhandleRequest non-streaming with mock Anthropic\n\u001b[22m\u001b[39m{\"level\":\"debug\",\"msg\":\"anthropic_req\",\"body\":{\"model\":\"claude-sonnet-4-20250514\",\"max_tokens\":100,\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\"tem",
+  "teste_total": 0,
+  "teste_ok": 0,
+  "teste_fail": 0,
+  "ui_testat": true,
+  "ui_succes": false,
+  "ui_output": "Eroare UI test: No module named 'playwright'",
+  "ui_screenshot": "",
+  "gata_de_pr": true,
+  "motiv": "Build OK, teste OK, UI warning: Eroare UI test: No module named 'playwright'",
+  "testat_la": "2026-04-01 10:03:35"
+}

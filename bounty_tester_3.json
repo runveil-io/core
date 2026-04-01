@@ -1,0 +1,18 @@
+{
+  "build_succes": false,
+  "build_output": "\n> veil-protocol@0.1.0 build\n> tsup\n\n\u001b[34mCLI\u001b[39m Building entry: src/cli.ts\n\u001b[34mCLI\u001b[39m Using tsconfig: tsconfig.json\n\u001b[34mCLI\u001b[39m tsup v8.5.1\n\u001b[34mCLI\u001b[39m Using tsup config: C:\\Users\\danis\\bounties\\runveil-io__core__20260401\\tsup.config.ts\n\u001b[34mCLI\u001b[39m Target: node22\n\u001b[34mCLI\u001b[39m Cleaning output folder\n\u001b[34mCJS\u001b[39m Build start\n",
+  "build_eroare": "X [ERROR] Could not resolve \"./rate-limiter.js\"\n\n    src/relay/index.ts:15:28:\n      15 â”‚ import { RateLimiter } from './rate-limiter.js';\n         â•µ                             ~~~~~~~~~~~~~~~~~~~\n\n<anonymous_script>:1\n\n\nSyntaxError: Unexpected end of JSON input\n    at JSON.parse (<anonymous>)\n    at parseJSON (C:\\Users\\danis\\bounties\\runveil-io__core__20260401\\node_modules\\esbuild\\lib\\main.js:1882:15)\n    at buildResponseToResult (C:\\Users\\danis\\bounties\\runveil-io__core__20260401\\node_mod",
+  "teste_rulate": false,
+  "teste_succes": false,
+  "teste_output": "",
+  "teste_total": 0,
+  "teste_ok": 0,
+  "teste_fail": 0,
+  "ui_testat": false,
+  "ui_succes": false,
+  "ui_output": "",
+  "ui_screenshot": "",
+  "gata_de_pr": false,
+  "motiv": "Build esuat: X [ERROR] Could not resolve \"./rate-limiter.js\"\n\n    src/relay/index.ts:15:28:\n      15 â”‚ import { RateLimiter } from './rate-limiter.js';\n         â•µ                             ~~~~~~~~~~~~~~~~~~",
+  "testat_la": "2026-04-01 10:01:43"
+}

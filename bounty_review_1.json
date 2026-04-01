@@ -1,0 +1,17 @@
+{
+  "verdict": "NU_TRIMITE",
+  "rezolva_cerinta": false,
+  "stil_respectat": false,
+  "efecte_secundare": true,
+  "fisiere_lipsa": true,
+  "explicatie": "Issue-ul cere explicit crearea unui fisier nou `src/consumer/selector.ts` cu logica de selectie separata si fallback la urmatorul provider pe eroare, plus teste in `tests/selector.test.ts`. Fix-ul nu creeaza niciunul din aceste fisiere si in schimb sterge cod existent din `index.ts` fara sa-l inlocuiasca, lasand functionalitatea incompleta. Diff-ul arata doar linii sterse (-) fara adaugari clare, ceea ce sugereaza o regresie severa.",
+  "recomandari": [
+    "Creeaza `src/consumer/selector.ts` ca modul independent cu interfata clara (selectProvider, fallbackProvider)",
+    "Implementeaza logica de fallback: la eroare pe provider curent, incerca urmatorul din lista filtrata dupa model/capacity",
+    "Adauga `tests/selector.test.ts` cu teste pentru: selectie normala, fallback pe eroare, cazul fara provider disponibil",
+    "Nu sterge logica existenta din `index.ts` — refactorizeaz-o sa foloseasca noul selector",
+    "Adauga selectie dupa latenta conform spec-ului v0.2, nu doar primul available"
+  ],
+  "scor_incredere": 12,
+  "review_la": "2026-04-01 10:06:16"
+}
