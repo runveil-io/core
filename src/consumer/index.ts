@@ -66,6 +66,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
   const defaultBudget = options.defaultBudgetUsdc ?? DEFAULT_MAX_COST_USDC;
   let providers: ProviderInfo[] = [];
   let relayConnected = false;
+  let shuttingDown = false; // Graceful shutdown flag
 
   // Pending request handlers
   const pendingRequests = new Map<string, {
@@ -272,6 +273,11 @@ export async function startGateway(options: GatewayOptions): Promise<{
   });
 
   app.post('/v1/chat/completions', async (c) => {
+    // Graceful shutdown: reject new requests
+    if (shuttingDown) {
+      return errorResponse('Gateway is shutting down', 'api_error', 'shutting_down', 503);
+    }
+
     let body: ChatCompletionRequest;
     try {
       body = await c.req.json<ChatCompletionRequest>();
@@ -593,8 +599,45 @@ export async function startGateway(options: GatewayOptions): Promise<{
 
   return {
     async close(): Promise<void> {
+      // Graceful shutdown: Phase 1 - Reject new requests
+      shuttingDown = true;
+      log.info('gateway_shutdown_started', { pending_requests: pendingRequests.size });
+
+      // Phase 2 - Wait for active requests to complete (with timeout)
+      const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 30000; // 30 seconds
+      const startTime = Date.now();
+      
+      while (pendingRequests.size > 0 && Date.now() - startTime < GRACEFUL_SHUTDOWN_TIMEOUT_MS) {
+        log.debug('gateway_shutdown_waiting', { pending: pendingRequests.size });
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      if (pendingRequests.size > 0) {
+        log.warn('gateway_shutdown_timeout', { pending_requests: pendingRequests.size });
+        // Reject all pending requests
+        for (const [requestId, handler] of pendingRequests) {
+          handler.reject(new Error('Gateway shutting down'));
+          pendingRequests.delete(requestId);
+        }
+      }
+
+      // Phase 3 - Send abort to Relay
+      if (relayConn && relayConn.readyState === 'open') {
+        for (const requestId of pendingRequests.keys()) {
+          relayConn.send({
+            type: 'abort',
+            request_id: requestId,
+            payload: { request_id: requestId, reason: 'Gateway shutting down' },
+            timestamp: Date.now(),
+          });
+        }
+      }
+
+      // Phase 4 - Close HTTP server and Relay connection
       server.close();
       relayConn?.close();
+      
+      log.info('gateway_shutdown_complete');
     },
     port,
   };

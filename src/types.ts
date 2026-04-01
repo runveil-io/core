@@ -12,7 +12,10 @@ export type MessageType =
   | 'ping'
   | 'pong'
   | 'list_providers'
-  | 'provider_list';
+  | 'provider_list'
+  | 'abort'
+  | 'shutdown'
+  | 'provider_shutdown';
 
 export interface WsMessage {
   type: MessageType;
@@ -135,4 +138,19 @@ export interface ProviderInfo {
   encryption_pubkey: string;
   models: string[];
   capacity: number;
+}
+
+export interface AbortPayload {
+  request_id: string;
+  reason: string;
+}
+
+export interface ShutdownPayload {
+  reason: string;
+  grace_period_ms?: number;
+}
+
+export interface ProviderShutdownPayload {
+  provider_id: string;
+  reason: string;
 }

@@ -504,11 +504,44 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
 
   return {
     async close(): Promise<void> {
+      // Graceful shutdown: Phase 1 - Wait for active requests (with timeout)
+      log.info('provider_shutdown_started', { active_requests: activeRequests });
+      
+      const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 30000; // 30 seconds as per Issue #48
+      const startTime = Date.now();
+      
+      while (activeRequests > 0 && Date.now() - startTime < GRACEFUL_SHUTDOWN_TIMEOUT_MS) {
+        log.debug('provider_shutdown_waiting', { active_requests: activeRequests });
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      if (activeRequests > 0) {
+        log.warn('provider_shutdown_timeout', { active_requests: activeRequests });
+      }
+
+      // Phase 2 - Send provider_shutdown to all Relays
+      const shutdownMsg: WsMessage = {
+        type: 'provider_shutdown',
+        payload: {
+          provider_id: toHex(wallet.signingPublicKey),
+          reason: 'Provider shutting down',
+        },
+        timestamp: Date.now(),
+      };
+      
+      conn.send(shutdownMsg);
+      for (const ec of extraConnections) {
+        ec.send(shutdownMsg);
+      }
+
+      // Phase 3 - Close health server and all Relay connections
       healthServer?.close();
       for (const ec of extraConnections) {
         ec.close();
       }
       conn.close();
+      
+      log.info('provider_shutdown_complete');
     },
   };
 }

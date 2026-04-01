@@ -468,9 +468,51 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
   return {
     async close(): Promise<void> {
+      // Graceful shutdown: Phase 1 - Notify connected clients
+      log.info('relay_shutdown_started', { providers: providers.size, consumers: consumers.size });
+
+      // Send shutdown message to all connected Providers
+      const shutdownMsg: WsMessage = {
+        type: 'shutdown',
+        payload: { reason: 'Relay shutting down', grace_period_ms: 5000 },
+        timestamp: Date.now(),
+      };
+      
+      for (const [providerId, provider] of providers) {
+        try {
+          provider.conn.send(shutdownMsg);
+          log.debug('relay_shutdown_notify_provider', { provider_id: providerId.slice(0, 16) });
+        } catch {
+          // Connection may already be closed
+        }
+      }
+
+      // Send shutdown message to all active Consumers
+      for (const [requestId, consumerConn] of consumers) {
+        try {
+          consumerConn.send(shutdownMsg);
+          log.debug('relay_shutdown_notify_consumer', { request_id: requestId.slice(0, 8) });
+        } catch {
+          // Connection may already be closed
+        }
+      }
+
+      // Phase 2 - Wait for connections to close (with timeout)
+      const GRACEFUL_SHUTDOWN_TIMEOUT_MS = 5000; // 5 seconds grace period
+      const startTime = Date.now();
+      
+      while ((providers.size > 0 || consumers.size > 0) && Date.now() - startTime < GRACEFUL_SHUTDOWN_TIMEOUT_MS) {
+        log.debug('relay_shutdown_waiting', { providers: providers.size, consumers: consumers.size });
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      if (providers.size > 0 || consumers.size > 0) {
+        log.warn('relay_shutdown_timeout', { providers: providers.size, consumers: consumers.size });
+      }
+
+      // Phase 3 - Cancel heartbeat and deregister from bootstrap
       if (heartbeatInterval) clearInterval(heartbeatInterval);
 
-      // Deregister from bootstrap
       if (bootstrapUrl) {
         const relayPubkey = toHex(wallet.signingPublicKey);
         try {
@@ -481,9 +523,12 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
         }
       }
 
+      // Phase 4 - Flush and close witness DB, close server and main DB
+      witnessStore.close(); // This flushes any pending writes
       server.close();
       db.close();
-      witnessStore.close();
+      
+      log.info('relay_shutdown_complete');
     },
     witnessStore,
   };
