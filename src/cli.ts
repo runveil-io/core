@@ -3,6 +3,7 @@ import { startGateway } from './consumer/index.js';
 import { startProvider } from './provider/index.js';
 import { startRelay } from './relay/index.js';
 import { DEFAULT_GATEWAY_PORT, DEFAULT_RELAY_PORT, OFFICIAL_RELAY_URL, MODEL_MAP } from './config/bootstrap.js';
+import { validateConfig, validateProviderConfig, ConfigValidationError } from './config/validate.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -153,6 +154,12 @@ async function cmdInit(): Promise<void> {
   try {
     await new Promise(resolve => setTimeout(resolve, 500)); // Minimum spinner display
     const info = await createWallet(password, home);
+
+    // Validate the generated config
+    const configPath = join(home, 'config.json');
+    const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+    validateConfig(config);
+
     const pk = info.signingPublicKey;
     
     spinner.stop('Wallet generated', true);
@@ -169,6 +176,10 @@ async function cmdInit(): Promise<void> {
     output.write(`  2. Run ${colors.info('veil provide init')} to configure as provider\n`);
   } catch (err) {
     spinner.stop('Failed to create wallet', false);
+    if (err instanceof ConfigValidationError) {
+      console.error(colors.error(err.message));
+      process.exit(1);
+    }
     console.error(colors.error((err as Error).message));
     process.exit(1);
   }
@@ -254,9 +265,13 @@ async function cmdProvideStart(): Promise<void> {
     process.exit(1);
   }
 
-  const providerConfig = JSON.parse(readFileSync(providerPath, 'utf-8'));
+  const rawProviderConfig = JSON.parse(readFileSync(providerPath, 'utf-8'));
   const configPath = join(home, 'config.json');
-  const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+  const rawConfig = JSON.parse(readFileSync(configPath, 'utf-8'));
+
+  // Validate config files before proceeding
+  const config = validateConfig(rawConfig);
+  const providerConfig = validateProviderConfig(rawProviderConfig);
 
   // Decrypt API keys, fallback to env
   const apiKeys: Array<{ provider: 'anthropic'; key: string }> = [];
@@ -365,7 +380,8 @@ async function cmdStatus(): Promise<void> {
   const spinner = new Spinner('Checking status');
   spinner.start();
 
-  const config = JSON.parse(readFileSync(configPath, 'utf-8'));
+  const rawConfig = JSON.parse(readFileSync(configPath, 'utf-8'));
+  const config = validateConfig(rawConfig);
   const pk = config.consumer_pubkey;
 
   // Check gateway
