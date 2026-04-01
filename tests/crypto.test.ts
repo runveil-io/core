@@ -78,4 +78,39 @@ describe('crypto', () => {
     // Total length: 32 + 24 + (plaintext.length + 16 MAC)
     expect(sealed.length).toBe(32 + 24 + plaintext.length + 16);
   });
+
+  describe('input validation', () => {
+    it('fromHex validates input format', () => {
+      expect(() => fromHex(null as any)).toThrow('Invalid hex: input must be a string');
+      expect(() => fromHex('123')).toThrow('Invalid hex: length must be even, got 3');
+      expect(() => fromHex('123x')).toThrow('Invalid hex: contains non-hexadecimal characters');
+    });
+
+    it('sign validates secret key length', () => {
+      const msg = new Uint8Array([1, 2, 3]);
+      const badKey = new Uint8Array(63);
+      expect(() => sign(msg, badKey)).toThrow('Invalid sign secretKey length: expected 64 bytes, got 63');
+    });
+
+    it('verify validates public key length', () => {
+      const msg = new Uint8Array([1, 2, 3]);
+      const sig = new Uint8Array(64);
+      const badKey = new Uint8Array(31);
+      expect(() => verify(msg, sig, badKey)).toThrow('Invalid verify publicKey length: expected 32 bytes, got 31');
+    });
+
+    it('seal validates key lengths', () => {
+      const pt = new Uint8Array([1]);
+      const pub = new Uint8Array(32);
+      const sec = new Uint8Array(32);
+      expect(() => seal(pt, new Uint8Array(31), sec)).toThrow('Invalid seal recipientPubkey length');
+      expect(() => seal(pt, pub, new Uint8Array(33))).toThrow('Invalid seal senderSecretKey length');
+    });
+
+    it('open validates inputs', () => {
+      const sec = new Uint8Array(32);
+      expect(() => open(new Uint8Array(55), sec)).toThrow('Invalid sealed data: minimum length is 56 bytes, got 55');
+      expect(() => open(new Uint8Array(56), new Uint8Array(31))).toThrow('Invalid open recipientSecretKey length');
+    });
+  });
 });
