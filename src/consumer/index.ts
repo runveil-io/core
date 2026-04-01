@@ -1,6 +1,8 @@
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { createLogger } from '../logger.js';
+import { createBudgetTracker, DEFAULT_MAX_COST_USDC, DEFAULT_MAX_DURATION_MS } from './budget.js';
+import type { BudgetConfig, BudgetTracker } from './budget.js';
 
 const log = createLogger('consumer');
 import { nanoid } from 'nanoid';
@@ -32,6 +34,7 @@ export interface GatewayOptions {
   relayUrl: string;
   apiKey?: string;
   discoveryClient?: RelayDiscoveryClient;
+  defaultBudgetUsdc?: number;
 }
 
 const startTime = Date.now();
@@ -60,6 +63,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
   port: number;
 }> {
   const { port, wallet, relayUrl, apiKey } = options;
+  const defaultBudget = options.defaultBudgetUsdc ?? DEFAULT_MAX_COST_USDC;
   let providers: ProviderInfo[] = [];
   let relayConnected = false;
 
@@ -291,6 +295,14 @@ export async function startGateway(options: GatewayOptions): Promise<{
       return errorResponse('Relay not connected', 'api_error', null, 502);
     }
 
+    // --- Budget Guard ---
+    const budgetInput = (body as any).budget as { max_cost_usdc?: number; max_duration_ms?: number } | undefined;
+    const budgetConfig: BudgetConfig = {
+      max_cost_usdc: budgetInput?.max_cost_usdc ?? defaultBudget,
+      max_duration_ms: budgetInput?.max_duration_ms ?? DEFAULT_MAX_DURATION_MS,
+    };
+    const budget = createBudgetTracker(body.model, budgetConfig);
+
     if (body.stream) {
       // Streaming response
       const created = Math.floor(Date.now() / 1000);
@@ -341,6 +353,41 @@ export async function startGateway(options: GatewayOptions): Promise<{
                       const text = new TextDecoder().decode(decrypted);
 
                       midStream = true;
+
+                      // Accumulate usage for budget tracking
+                      // Estimate ~1 output token per chunk (provider doesn't send token counts per chunk)
+                      budget.addUsage(0, Math.max(1, Math.ceil(text.length / 4)));
+
+                      // Check budget + timeout
+                      const budgetResult = budget.check();
+                      if (budgetResult) {
+                        const errPayload = JSON.stringify({
+                          error: {
+                            type: 'budget_exceeded',
+                            message: budgetResult.reason,
+                            used: budgetResult.used_usdc,
+                            limit: budgetResult.limit_usdc,
+                          },
+                        });
+                        controller.enqueue(encoder.encode(`data: ${errPayload}\n\n`));
+                        controller.enqueue(encoder.encode(makeDone()));
+                        controller.close();
+                        return;
+                      }
+                      if (budget.checkTimeout()) {
+                        const errPayload = JSON.stringify({
+                          error: {
+                            type: 'budget_exceeded',
+                            message: `Request exceeded time limit of ${budgetConfig.max_duration_ms}ms`,
+                            used: budget.summary().estimated_cost_usdc,
+                            limit: budgetConfig.max_cost_usdc,
+                          },
+                        });
+                        controller.enqueue(encoder.encode(`data: ${errPayload}\n\n`));
+                        controller.enqueue(encoder.encode(makeDone()));
+                        controller.close();
+                        return;
+                      }
 
                       try {
                         const parsed = JSON.parse(text) as { role?: string; content?: string; finish_reason?: string };
@@ -403,6 +450,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
           'content-type': 'text/event-stream',
           'cache-control': 'no-cache',
           'connection': 'keep-alive',
+          'x-veil-budget-remaining': budget.remaining().toFixed(6),
         },
       });
     } else {
@@ -473,9 +521,34 @@ export async function startGateway(options: GatewayOptions): Promise<{
                     },
                   };
 
+                  // Track usage for budget
+                  budget.addUsage(result.usage.input_tokens, result.usage.output_tokens);
+
+                  const budgetResult = budget.check();
+                  if (budgetResult) {
+                    resolve(new Response(JSON.stringify({
+                      error: {
+                        type: 'budget_exceeded',
+                        message: budgetResult.reason,
+                        used: budgetResult.used_usdc,
+                        limit: budgetResult.limit_usdc,
+                      },
+                    }), {
+                      status: 402,
+                      headers: {
+                        'content-type': 'application/json',
+                        'x-veil-budget-remaining': '0.000000',
+                      },
+                    }));
+                    return;
+                  }
+
                   resolve(new Response(JSON.stringify(response), {
                     status: 200,
-                    headers: { 'content-type': 'application/json' },
+                    headers: {
+                      'content-type': 'application/json',
+                      'x-veil-budget-remaining': budget.remaining().toFixed(6),
+                    },
                   }));
                 },
                 reject: (err) => {

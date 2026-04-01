@@ -813,6 +813,80 @@ async function cmdWalletMigrate(): Promise<void> {
   }
 }
 
+async function cmdUseStart(): Promise<void> {
+  const home = getVeilHome();
+  const password = await promptPassword('Wallet password: ');
+
+  const spinner = new Spinner('Loading wallet');
+  spinner.start();
+  const wallet = await loadWallet(password, home);
+  spinner.stop('Wallet loaded', true);
+
+  let config: Record<string, unknown>;
+  try {
+    config = loadAndValidateConfig(home);
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
+  }
+
+  // Budget: --budget flag > config.json default_budget_usdc > $1.00
+  const budgetIdx = process.argv.indexOf('--budget');
+  let defaultBudgetUsdc = 1.0;
+  if (budgetIdx !== -1 && process.argv[budgetIdx + 1]) {
+    defaultBudgetUsdc = Number(process.argv[budgetIdx + 1]);
+    if (!Number.isFinite(defaultBudgetUsdc) || defaultBudgetUsdc <= 0) {
+      console.error(colors.error('Budget must be a positive number.'));
+      process.exit(1);
+    }
+  } else if (typeof config.default_budget_usdc === 'number') {
+    defaultBudgetUsdc = config.default_budget_usdc;
+  }
+
+  const relayUrl = (config.relay_url as string) ?? OFFICIAL_RELAY_URL;
+  const gatewayPort = Number(config.gateway_port ?? DEFAULT_GATEWAY_PORT);
+
+  const discoveryMode = (config.relay_discovery as RelayDiscoveryMode | undefined) ?? 'static';
+  let discoveryClient: RelayDiscoveryClient | undefined;
+  if (discoveryMode === 'bootstrap') {
+    discoveryClient = new RelayDiscoveryClient({
+      bootstrapUrl: (config.bootstrap_url as string) ?? DEFAULT_BOOTSTRAP_URL,
+      cacheTtlMs: RELAY_DISCOVERY_CACHE_TTL_MS,
+      maxRelays: RELAY_DISCOVERY_MAX_RELAYS,
+    });
+  }
+
+  spinner.start('Starting consumer gateway');
+  const gateway = await startGateway({
+    port: gatewayPort,
+    wallet,
+    relayUrl,
+    apiKey: (config.api_key as string) ?? undefined,
+    discoveryClient,
+    defaultBudgetUsdc,
+  });
+  spinner.stop('Consumer gateway started', true);
+
+  output.write('\n');
+  output.write(colors.success('✓ Consumer online!\n\n'));
+  output.write(colors.dim('Configuration:\n'));
+  output.write(`  ${colors.bold('Endpoint:')}    ${colors.info(`http://localhost:${gatewayPort}/v1`)}\n`);
+  output.write(`  ${colors.bold('Budget:')}      ${colors.info(`$${defaultBudgetUsdc.toFixed(2)} per request`)}\n`);
+  output.write(`  ${colors.bold('Relay:')}       ${colors.info(relayUrl)}\n`);
+
+  process.on('SIGINT', async () => {
+    output.write('\n');
+    output.write(colors.warning('Shutting down consumer...\n'));
+    await gateway.close();
+    output.write(colors.success('Consumer stopped.\n'));
+    process.exit(0);
+  });
+  process.on('SIGTERM', async () => {
+    await gateway.close();
+    process.exit(0);
+  });
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -910,11 +984,21 @@ async function main(): Promise<void> {
           break;
       }
       break;
+    case 'use':
+      if (args[1] === 'start') await cmdUseStart();
+      else {
+        output.write(colors.bold('Consumer Gateway\n\n'));
+        output.write(colors.dim('Usage: veil use <command>\n\n'));
+        output.write(colors.bold('Commands:\n'));
+        output.write(`  ${colors.info('start [--budget 0.50]')}    Start consumer gateway\n`);
+      }
+      break;
     default:
       output.write(colors.bold('Veil - Decentralized AI Inference Protocol\n\n'));
       output.write(colors.dim('Usage: veil <command>\n\n'));
       output.write(colors.bold('Commands:\n'));
       output.write(`  ${colors.info('init')}            Initialize Veil wallet\n`);
+      output.write(`  ${colors.info('use start')}       Start Consumer gateway\n`);
       output.write(`  ${colors.info('provide init')}    Configure as Provider\n`);
       output.write(`  ${colors.info('provide start')}   Start Provider\n`);
       output.write(`  ${colors.info('relay start')}     Start Relay server\n`);
