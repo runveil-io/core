@@ -5,6 +5,7 @@ import { connect } from '../network/index.js';
 import { seal, open, sign, sha256, toHex, fromHex } from '../crypto/index.js';
 import { MODELS, MODEL_MAP } from '../config/bootstrap.js';
 import { makeChunk, makeDone } from './anthropic-stream.js';
+import { ProviderSelector } from './selector.js';
 import type { Connection } from '../network/index.js';
 import type { Wallet } from '../wallet/index.js';
 import type {
@@ -55,6 +56,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
   const { port, wallet, relayUrl, apiKey } = options;
   let providers: ProviderInfo[] = [];
   let relayConnected = false;
+  const selector = new ProviderSelector();
 
   // Pending request handlers
   const pendingRequests = new Map<string, {
@@ -72,6 +74,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
         onMessage(msg: WsMessage) {
           if (msg.type === 'provider_list') {
             providers = (msg.payload as ProviderListPayload).providers;
+            selector.updateProviders(providers);
             return;
           }
 
@@ -119,15 +122,6 @@ export async function startGateway(options: GatewayOptions): Promise<{
     } catch (err) {
       console.log(JSON.stringify({ level: 'error', msg: 'relay_connect_failed', error: (err as Error).message }));
     }
-  }
-
-  function selectProvider(model: string): ProviderInfo | null {
-    const available = providers.filter(
-      (p) => p.models.includes(model) && p.capacity > 0,
-    );
-    if (available.length === 0) return null;
-    // Simple: pick first available
-    return available[0]!;
   }
 
   function buildRequest(
@@ -182,6 +176,69 @@ export async function startGateway(options: GatewayOptions): Promise<{
       payload,
       timestamp,
     };
+  }
+
+  async function sendWithFallback(
+    requestId: string,
+    body: ChatCompletionRequest,
+    onChunk?: (msg: WsMessage) => void,
+  ): Promise<WsMessage> {
+    let lastError: Error | null = null;
+    const triedProviders = new Set<string>();
+
+    while (true) {
+      const provider = selector.selectProvider(body.model, triedProviders);
+      if (!provider) {
+        throw lastError ?? new Error('no_provider:No providers available');
+      }
+
+      triedProviders.add(provider.provider_id);
+
+      let wsMsg: WsMessage;
+      try {
+        wsMsg = buildRequest(requestId, body, provider);
+      } catch (err: any) {
+        selector.rotateOnError(provider.provider_id);
+        lastError = err;
+        continue;
+      }
+
+      try {
+        const result = await new Promise<WsMessage>((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            pendingRequests.delete(requestId);
+            reject(new Error('timeout:Request timeout'));
+          }, Number(process.env['VEIL_REQUEST_TIMEOUT'] ?? 120000));
+
+          pendingRequests.set(requestId, {
+            resolve: (value) => {
+              clearTimeout(timeout);
+              resolve(value as WsMessage);
+            },
+            reject: (err) => {
+              clearTimeout(timeout);
+              reject(err);
+            },
+            onChunk,
+          });
+
+          relayConn!.send(wsMsg);
+        });
+
+        selector.recordSuccess(provider.provider_id);
+        return result;
+      } catch (err: any) {
+        pendingRequests.delete(requestId);
+        selector.rotateOnError(provider.provider_id);
+        lastError = err;
+
+        const msg: string = err.message ?? '';
+        if (msg.includes('rate_limit') || msg.includes('no_provider') || msg.includes('timeout')) {
+          continue;
+        }
+        continue;
+      }
+    }
   }
 
   const app = new Hono();
@@ -253,79 +310,66 @@ export async function startGateway(options: GatewayOptions): Promise<{
       return errorResponse('Relay not connected', 'api_error', null, 502);
     }
 
-    const provider = selectProvider(body.model);
-    if (!provider) {
+    const initialProvider = selector.selectProvider(body.model);
+    if (!initialProvider) {
       return errorResponse('No providers available', 'api_error', 'no_providers', 503);
     }
 
     const requestId = 'veil-' + nanoid(24);
-    let wsMsg: WsMessage;
-    try {
-      wsMsg = buildRequest(requestId, body, provider);
-    } catch (err: any) {
-      console.log(JSON.stringify({ level: 'error', msg: 'build_request_failed', error: err.message, stack: err.stack?.split('\n').slice(0, 3) }));
-      return errorResponse('Failed to build request: ' + err.message, 'api_error', null, 500);
-    }
 
     if (body.stream) {
-      // Streaming response
       const created = Math.floor(Date.now() / 1000);
       const stream = new ReadableStream({
         start(controller) {
           const encoder = new TextEncoder();
           let sentRole = false;
 
-          const pending = {
-            resolve: (_value: unknown) => {
-              controller.close();
-            },
-            reject: (err: Error) => {
-              const errChunk = makeChunk(requestId, body.model, created, {}, null);
-              controller.enqueue(encoder.encode(errChunk));
-              controller.enqueue(encoder.encode(makeDone()));
-              controller.close();
-            },
-            onChunk: (msg: WsMessage) => {
-              if (msg.type === 'stream_chunk') {
-                const payload = msg.payload as StreamChunkPayload;
-                const decrypted = open(
-                  new Uint8Array(Buffer.from(payload.encrypted_chunk, 'base64')),
-                  wallet.encryptionSecretKey,
-                );
-                if (!decrypted) return;
-                const text = new TextDecoder().decode(decrypted);
+          const onChunk = (msg: WsMessage) => {
+            if (msg.type === 'stream_chunk') {
+              const payload = msg.payload as StreamChunkPayload;
+              const decrypted = open(
+                new Uint8Array(Buffer.from(payload.encrypted_chunk, 'base64')),
+                wallet.encryptionSecretKey,
+              );
+              if (!decrypted) return;
+              const text = new TextDecoder().decode(decrypted);
 
-                try {
-                  const parsed = JSON.parse(text) as { role?: string; content?: string; finish_reason?: string };
-                  if (parsed.role && !sentRole) {
-                    sentRole = true;
-                    controller.enqueue(
-                      encoder.encode(makeChunk(requestId, body.model, created, { role: parsed.role }, null)),
-                    );
-                  } else if (parsed.finish_reason) {
-                    controller.enqueue(
-                      encoder.encode(makeChunk(requestId, body.model, created, {}, parsed.finish_reason)),
-                    );
-                  } else {
-                    // Plain text content
-                    controller.enqueue(
-                      encoder.encode(makeChunk(requestId, body.model, created, { content: text }, null)),
-                    );
-                  }
-                } catch {
-                  // Plain text content
+              try {
+                const parsed = JSON.parse(text) as { role?: string; content?: string; finish_reason?: string };
+                if (parsed.role && !sentRole) {
+                  sentRole = true;
+                  controller.enqueue(
+                    encoder.encode(makeChunk(requestId, body.model, created, { role: parsed.role }, null)),
+                  );
+                } else if (parsed.finish_reason) {
+                  controller.enqueue(
+                    encoder.encode(makeChunk(requestId, body.model, created, {}, parsed.finish_reason)),
+                  );
+                } else {
                   controller.enqueue(
                     encoder.encode(makeChunk(requestId, body.model, created, { content: text }, null)),
                   );
                 }
-              } else if (msg.type === 'stream_end') {
-                controller.enqueue(encoder.encode(makeDone()));
+              } catch {
+                controller.enqueue(
+                  encoder.encode(makeChunk(requestId, body.model, created, { content: text }, null)),
+                );
               }
-            },
+            } else if (msg.type === 'stream_end') {
+              controller.enqueue(encoder.encode(makeDone()));
+            }
           };
 
-          pendingRequests.set(requestId, pending);
-          relayConn!.send(wsMsg);
+          sendWithFallback(requestId, body, onChunk)
+            .then(() => {
+              controller.close();
+            })
+            .catch((err: Error) => {
+              const errChunk = makeChunk(requestId, body.model, created, {}, null);
+              controller.enqueue(encoder.encode(errChunk));
+              controller.enqueue(encoder.encode(makeDone()));
+              controller.close();
+            });
         },
       });
 
@@ -337,87 +381,52 @@ export async function startGateway(options: GatewayOptions): Promise<{
         },
       });
     } else {
-      // Non-streaming response
-      return new Promise<Response>((httpResolve) => {
-        const timeout = setTimeout(() => {
-          pendingRequests.delete(requestId);
-          httpResolve(errorResponse('Request timeout', 'api_error', 'timeout', 504));
-        }, Number(process.env['VEIL_REQUEST_TIMEOUT'] ?? 120000));
+      try {
+        const msg = await sendWithFallback(requestId, body);
+        const payload = msg.payload as ResponsePayload;
 
-        pendingRequests.set(requestId, {
-          resolve: (value) => {
-            clearTimeout(timeout);
-            const msg = value as WsMessage;
-            const payload = msg.payload as ResponsePayload;
+        const decrypted = open(
+          new Uint8Array(Buffer.from(payload.encrypted_body, 'base64')),
+          wallet.encryptionSecretKey,
+        );
+        if (!decrypted) {
+          return errorResponse('Failed to decrypt response', 'api_error', 'decrypt_failed', 500);
+        }
 
-            const decrypted = open(
-              new Uint8Array(Buffer.from(payload.encrypted_body, 'base64')),
-              wallet.encryptionSecretKey,
-            );
-            if (!decrypted) {
-              httpResolve(errorResponse('Failed to decrypt response', 'api_error', 'decrypt_failed', 500));
-              return;
-            }
+        const result = JSON.parse(new TextDecoder().decode(decrypted)) as {
+          content: string;
+          usage: { input_tokens: number; output_tokens: number };
+          finish_reason: string;
+        };
 
-            const result = JSON.parse(new TextDecoder().decode(decrypted)) as {
-              content: string;
-              usage: { input_tokens: number; output_tokens: number };
-              finish_reason: string;
-            };
-
-            const response: ChatCompletionResponse = {
-              id: requestId,
-              object: 'chat.completion',
-              created: Math.floor(Date.now() / 1000),
-              model: body.model,
-              choices: [{
-                index: 0,
-                message: { role: 'assistant', content: result.content },
-                finish_reason: result.finish_reason as 'stop' | 'length',
-              }],
-              usage: {
-                prompt_tokens: result.usage.input_tokens,
-                completion_tokens: result.usage.output_tokens,
-                total_tokens: result.usage.input_tokens + result.usage.output_tokens,
-              },
-            };
-
-            httpResolve(new Response(JSON.stringify(response), {
-              status: 200,
-              headers: { 'content-type': 'application/json' },
-            }));
+        const response: ChatCompletionResponse = {
+          id: requestId,
+          object: 'chat.completion',
+          created: Math.floor(Date.now() / 1000),
+          model: body.model,
+          choices: [{
+            index: 0,
+            message: { role: 'assistant', content: result.content },
+            finish_reason: result.finish_reason as 'stop' | 'length',
+          }],
+          usage: {
+            prompt_tokens: result.usage.input_tokens,
+            completion_tokens: result.usage.output_tokens,
+            total_tokens: result.usage.input_tokens + result.usage.output_tokens,
           },
-          reject: (err) => {
-            clearTimeout(timeout);
-            const msg = err.message;
-            if (msg.includes('no_provider')) {
-              httpResolve(errorResponse('No providers available', 'api_error', 'no_providers', 503));
-            } else if (msg.includes('rate_limit')) {
-              httpResolve(errorResponse('Rate limit exceeded', 'api_error', 'rate_limit', 429));
-            } else {
-              console.log(JSON.stringify({ level: 'error', msg: 'request_rejected', error: msg }));
-              httpResolve(errorResponse('Internal error: ' + msg, 'api_error', null, 500));
-            }
-          },
+        };
+
+        return new Response(JSON.stringify(response), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
         });
-
-        relayConn!.send(wsMsg);
-      });
-    }
-  });
-
-  // Connect to relay
-  await connectRelay();
-
-  const server = serve({ fetch: app.fetch, port });
-
-  console.log(JSON.stringify({ level: 'info', msg: 'gateway_started', port }));
-
-  return {
-    async close(): Promise<void> {
-      server.close();
-      relayConn?.close();
-    },
-    port,
-  };
-}
+      } catch (err: any) {
+        const msg: string = err.message ?? '';
+        if (msg.includes('no_provider')) {
+          return errorResponse('No providers available', 'api_error', 'no_providers', 503);
+        } else if (msg.includes('rate_limit')) {
+          return errorResponse('Rate limit exceeded', 'api_error', 'rate_limit', 429);
+        } else if (msg.includes('timeout')) {
+          return errorResponse('Request timeout', 'api_error', 'timeout', 504);
+        } else {
+          console.log(JSON.stringify({ level: '

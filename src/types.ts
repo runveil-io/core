@@ -136,3 +136,46 @@ export interface ProviderInfo {
   models: string[];
   capacity: number;
 }
+
+export interface RateLimitResult {
+  allowed: boolean;
+  retryAfter?: number;
+}
+
+export interface HealthCheckResponse {
+  status: 'healthy' | 'unhealthy';
+  uptime: number;
+  models: string[];
+  capacity: number;
+  version: string;
+}
+
+export type ProviderHealthStatus = 'healthy' | 'degraded' | 'down';
+
+export interface ProviderMetrics {
+  provider_id: string;
+  latency_ms: number;
+  capacity: number;
+  available_capacity: number;
+  health: ProviderHealthStatus;
+  consecutive_failures: number;
+  last_failure_at?: number;
+  last_success_at?: number;
+  score?: number;
+  score_cached_at?: number;
+}
+
+export interface ProviderSelectionCriteria {
+  model: string;
+  preferred_provider_id?: string;
+  max_latency_ms?: number;
+  min_capacity?: number;
+}
+
+export interface ProviderSelectorConfig {
+  score_ttl_ms: number;
+  circuit_breaker_threshold: number;
+  circuit_breaker_reset_ms: number;
+  capacity_weight: number;
+  latency_weight: number;
+}
