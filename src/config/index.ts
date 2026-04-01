@@ -7,3 +7,4 @@ export const RELAY_RATE_LIMIT = (() => {
   }
   return parsed;
 })();
+export const config = { rateLimit: RELAY_RATE_LIMIT };
