@@ -1,9 +1,9 @@
-import type { Connection } from '../network/index.js';
+import type { Connection, ServerHandle } from '../network/index.js';
 import { createServer } from '../network/index.js';
 import { createLogger } from '../logger.js';
 
 const log = createLogger('relay');
-import { initDatabase } from '../db.js';
+import { initDatabase, checkpointAndClose } from '../db.js';
 import { verify, sign, sha256, toHex, fromHex } from '../crypto/index.js';
 import { RateLimiter } from './rate_limiter.js';
 import { MAX_REQUEST_AGE_MS } from '../config/bootstrap.js';
@@ -327,7 +327,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
     });
   }
 
-  const server = createServer({
+  const server: ServerHandle = createServer({
     port,
     onConnection(conn) {
       let isProvider = false;
@@ -387,8 +387,44 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
   return {
     async close(): Promise<void> {
-      server.close();
-      db.close();
+      log.info('relay_shutdown_start', {
+        providers: providers.size,
+        activeStreams: consumers.size,
+      });
+
+      // 1. Notify all consumers of pending requests that relay is shutting down
+      for (const [requestId, consumerConn] of consumers) {
+        try {
+          consumerConn.send({
+            type: 'error',
+            request_id: requestId,
+            payload: { code: 'relay_shutdown', message: 'Relay shutting down' },
+            timestamp: Date.now(),
+          });
+        } catch { /* connection may already be dead */ }
+      }
+      consumers.clear();
+      requestMeta.clear();
+
+      // 2. Notify all providers that relay is shutting down
+      for (const [id, provider] of providers) {
+        try {
+          provider.conn.send({
+            type: 'provider_ack',
+            payload: { status: 'rejected', reason: 'relay_shutdown' },
+            timestamp: Date.now(),
+          });
+        } catch { /* connection may already be dead */ }
+      }
+      providers.clear();
+
+      // 3. Close all WebSocket connections with proper 1001 close frame
+      await server.closeAll(1001, 'relay_shutdown', 5000);
+
+      // 4. WAL checkpoint and close DB
+      checkpointAndClose(db);
+
+      log.info('relay_shutdown_complete');
     },
   };
 }

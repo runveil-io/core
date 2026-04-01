@@ -214,6 +214,7 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
   const apiBase = proxyUrl ?? undefined;
 
   let activeRequests = 0;
+  let shuttingDown = false;
   const metrics = new MetricsStore();
 
   const conn = await connect({
@@ -230,6 +231,15 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
       }
 
       if (msg.type === 'request') {
+        if (shuttingDown) {
+          conn.send({
+            type: 'error',
+            request_id: msg.request_id,
+            payload: { code: 'rate_limit', message: 'Provider shutting down' },
+            timestamp: Date.now(),
+          });
+          return;
+        }
         if (activeRequests >= maxConcurrent) {
           conn.send({
             type: 'error',
@@ -441,8 +451,41 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
 
   return {
     async close(): Promise<void> {
+      // Idempotent
+      if (shuttingDown) return;
+      shuttingDown = true;
+
+      log.info('provider_shutdown_start', { activeRequests });
+
+      // Wait for active requests to finish, with 30s hard timeout
+      if (activeRequests > 0) {
+        await Promise.race([
+          // Poll until all requests complete
+          new Promise<void>((resolve) => {
+            const check = setInterval(() => {
+              if (activeRequests === 0) {
+                clearInterval(check);
+                resolve();
+              }
+            }, 500);
+          }),
+          // 30s timeout
+          new Promise<void>((resolve) => {
+            setTimeout(() => {
+              log.warn('provider_drain_timeout', { remaining: activeRequests });
+              resolve();
+            }, 30_000).unref();
+          }),
+        ]);
+      }
+
+      // Close relay connection with proper close frame
+      conn.close(1001, 'provider_shutdown');
+
+      // Close health server
       healthServer?.close();
-      conn.close();
+
+      log.info('provider_shutdown_complete');
     },
   };
 }

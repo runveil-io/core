@@ -60,12 +60,15 @@ export async function startGateway(options: GatewayOptions): Promise<{
   const { port, wallet, relayUrl, apiKey } = options;
   let providers: ProviderInfo[] = [];
   let relayConnected = false;
+  let shuttingDown = false;
 
-  // Pending request handlers
+  // Pending request handlers — each entry includes an AbortController
+  // so we can cancel in-flight streams during shutdown.
   const pendingRequests = new Map<string, {
     resolve: (value: unknown) => void;
     reject: (reason: Error) => void;
     onChunk?: (msg: WsMessage) => void;
+    abort: AbortController;
   }>();
 
   let relayConn: Connection | null = null;
@@ -239,6 +242,11 @@ export async function startGateway(options: GatewayOptions): Promise<{
   });
 
   app.post('/v1/chat/completions', async (c) => {
+    // Reject new requests during shutdown
+    if (shuttingDown) {
+      return errorResponse('Service shutting down', 'api_error', 'shutting_down', 503);
+    }
+
     let body: ChatCompletionRequest;
     try {
       body = await c.req.json<ChatCompletionRequest>();
@@ -342,7 +350,8 @@ export async function startGateway(options: GatewayOptions): Promise<{
                   },
                 };
 
-                pendingRequests.set(requestId, pending);
+                const requestAbort = new AbortController();
+                pendingRequests.set(requestId, { ...pending, abort: requestAbort });
                 relayConn!.send(wsMsg);
               });
 
@@ -406,6 +415,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
                 reject(new Error('timeout:Request timeout'));
               }, Number(process.env['VEIL_REQUEST_TIMEOUT'] ?? 120000));
 
+              const requestAbort = new AbortController();
               pendingRequests.set(requestId, {
                 resolve: (value) => {
                   clearTimeout(timeout);
@@ -453,6 +463,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
                   clearTimeout(timeout);
                   reject(err);
                 },
+                abort: requestAbort,
               });
 
               relayConn!.send(wsMsg);
@@ -491,8 +502,47 @@ export async function startGateway(options: GatewayOptions): Promise<{
 
   return {
     async close(): Promise<void> {
+      // Idempotent
+      if (shuttingDown) return;
+      shuttingDown = true;
+
+      log.info('gateway_shutdown_start', { pendingRequests: pendingRequests.size });
+
+      // Wait for pending requests to drain, with 30s hard timeout
+      if (pendingRequests.size > 0) {
+        await Promise.race([
+          // Wait for all pending requests to settle
+          new Promise<void>((resolve) => {
+            const check = setInterval(() => {
+              if (pendingRequests.size === 0) {
+                clearInterval(check);
+                resolve();
+              }
+            }, 200);
+          }),
+          // 30s timeout: abort everything still in-flight
+          new Promise<void>((resolve) => {
+            setTimeout(() => {
+              log.warn('gateway_drain_timeout', { remaining: pendingRequests.size });
+              // Abort all remaining pending requests
+              for (const [id, pending] of pendingRequests) {
+                pending.abort.abort();
+                pending.reject(new Error('shutdown_timeout:Gateway shutting down'));
+              }
+              pendingRequests.clear();
+              resolve();
+            }, 30_000).unref();
+          }),
+        ]);
+      }
+
+      // Close relay connection with proper close frame
+      relayConn?.close(1001, 'gateway_shutdown');
+
+      // Close HTTP server
       server.close();
-      relayConn?.close();
+
+      log.info('gateway_shutdown_complete');
     },
     port,
   };

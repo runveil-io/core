@@ -2,6 +2,7 @@ import { createWallet, loadWallet, getPublicKeys, encryptApiKey } from './wallet
 import { startGateway } from './consumer/index.js';
 import { startProvider } from './provider/index.js';
 import { startRelay } from './relay/index.js';
+import { createShutdownManager } from './shutdown.js';
 import { DEFAULT_GATEWAY_PORT, DEFAULT_RELAY_PORT, OFFICIAL_RELAY_URL, MODEL_MAP } from './config/bootstrap.js';
 import { loadAndValidateConfig, loadAndValidateProviderConfig } from './config/validator.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -318,17 +319,24 @@ async function cmdProvideStart(): Promise<void> {
   output.write(`  ${colors.bold('Relay:')}      ${colors.info(relayUrl)}\n`);
   output.write(`  ${colors.bold('Status:')}     ${colors.success('Waiting for requests...')}\n`);
 
-  process.on('SIGINT', async () => {
-    output.write('\n');
-    output.write(colors.warning('Shutting down provider...\n'));
-    await provider.close();
-    output.write(colors.success('Provider stopped.\n'));
-    process.exit(0);
-  });
-  process.on('SIGTERM', async () => {
-    await provider.close();
-    process.exit(0);
-  });
+  // Set up graceful shutdown via ShutdownManager
+  const shutdown = createShutdownManager();
+  shutdown.register('provider', () => provider.close(), 32_000);
+
+  // Wire CLI UX: spinner + status messages
+  const shutdownSpinner = new Spinner('Shutting down');
+  shutdown.onStatus = (message) => {
+    if (message.startsWith('Shutting')) {
+      output.write('\n');
+      shutdownSpinner.start();
+    } else if (message.startsWith('Done')) {
+      shutdownSpinner.stop(message, !message.includes('error'));
+    } else if (message.includes('force')) {
+      shutdownSpinner.stop(message, false);
+    } else {
+      shutdownSpinner.update(message.trim());
+    }
+  };
 }
 
 async function cmdRelayStart(): Promise<void> {
@@ -354,17 +362,24 @@ async function cmdRelayStart(): Promise<void> {
   output.write(`  ${colors.bold('WebSocket:')}  ${colors.info(`ws://0.0.0.0:${port}`)}\n`);
   output.write(`  ${colors.bold('Providers:')}  ${colors.success('0 connected')}\n`);
 
-  process.on('SIGINT', async () => {
-    output.write('\n');
-    output.write(colors.warning('Shutting down relay...\n'));
-    await relay.close();
-    output.write(colors.success('Relay stopped.\n'));
-    process.exit(0);
-  });
-  process.on('SIGTERM', async () => {
-    await relay.close();
-    process.exit(0);
-  });
+  // Set up graceful shutdown via ShutdownManager
+  const shutdown = createShutdownManager();
+  shutdown.register('relay', () => relay.close(), 10_000);
+
+  // Wire CLI UX: spinner + status messages
+  const shutdownSpinner = new Spinner('Shutting down');
+  shutdown.onStatus = (message) => {
+    if (message.startsWith('Shutting')) {
+      output.write('\n');
+      shutdownSpinner.start();
+    } else if (message.startsWith('Done')) {
+      shutdownSpinner.stop(message, !message.includes('error'));
+    } else if (message.includes('force')) {
+      shutdownSpinner.stop(message, false);
+    } else {
+      shutdownSpinner.update(message.trim());
+    }
+  };
 }
 
 async function cmdStatus(): Promise<void> {

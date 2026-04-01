@@ -15,7 +15,7 @@ import {
 export interface Connection {
   ws: WebSocket;
   send(msg: WsMessage): void;
-  close(): void;
+  close(code?: number, reason?: string): void;
   readonly readyState: 'connecting' | 'open' | 'closing' | 'closed';
 }
 
@@ -43,8 +43,10 @@ function wrapConnection(ws: WebSocket): Connection {
         ws.send(JSON.stringify(msg));
       }
     },
-    close(): void {
-      ws.close();
+    close(code: number = 1001, reason: string = 'going_away'): void {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close(code, reason);
+      }
     },
     get readyState(): Connection['readyState'] {
       return WS_STATE_MAP[ws.readyState] ?? 'closed';
@@ -68,10 +70,12 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
         this.ws.send(JSON.stringify(msg));
       }
     },
-    close(): void {
+    close(code: number = 1001, reason: string = 'going_away'): void {
       intentionallyClosed = true;
       cleanup();
-      this.ws?.close();
+      if (this.ws?.readyState === WebSocket.OPEN || this.ws?.readyState === WebSocket.CONNECTING) {
+        this.ws.close(code, reason);
+      }
     },
     get readyState(): Connection['readyState'] {
       return WS_STATE_MAP[this.ws?.readyState ?? WebSocket.CLOSED] ?? 'closed';
@@ -150,23 +154,92 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
   });
 }
 
+export interface ServerHandle {
+  close(): void;
+  /** Close all connected clients with a close code and wait for them to finish (with timeout). */
+  closeAll(code?: number, reason?: string, timeoutMs?: number): Promise<void>;
+  readonly port: number;
+  address(): { port: number };
+  /** Current number of connected clients. */
+  readonly connectionCount: number;
+}
+
 export function createServer(options: {
   port: number;
   onConnection: (conn: Connection, req: IncomingMessage) => void;
-}): { close(): void; port: number; address: () => { port: number } } {
+}): ServerHandle {
   const wss = new WebSocketServer({
     port: options.port,
     maxPayload: MAX_MESSAGE_SIZE,
   });
 
+  // Track all connected sockets for bulk close
+  const connections = new Set<WebSocket>();
+
   wss.on('connection', (ws, req) => {
+    connections.add(ws);
+    ws.on('close', () => connections.delete(ws));
     const conn = wrapConnection(ws);
     options.onConnection(conn, req);
   });
 
   return {
     close() { wss.close(); },
+
+    closeAll(code: number = 1001, reason: string = 'going_away', timeoutMs: number = 5000): Promise<void> {
+      // Snapshot to avoid mutation during iteration
+      const snapshot = Array.from(connections);
+      if (snapshot.length === 0) {
+        wss.close();
+        return Promise.resolve();
+      }
+
+      return new Promise<void>((resolve) => {
+        let remaining = snapshot.length;
+        const timer = setTimeout(() => {
+          // Force-terminate any that haven't closed yet
+          for (const ws of snapshot) {
+            if (ws.readyState !== WebSocket.CLOSED) {
+              ws.terminate();
+            }
+          }
+          connections.clear();
+          wss.close();
+          resolve();
+        }, timeoutMs);
+        timer.unref();
+
+        for (const ws of snapshot) {
+          if (ws.readyState === WebSocket.CLOSED) {
+            remaining--;
+            if (remaining === 0) {
+              clearTimeout(timer);
+              connections.clear();
+              wss.close();
+              resolve();
+            }
+            continue;
+          }
+
+          ws.once('close', () => {
+            remaining--;
+            if (remaining === 0) {
+              clearTimeout(timer);
+              connections.clear();
+              wss.close();
+              resolve();
+            }
+          });
+
+          if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+            ws.close(code, reason);
+          }
+        }
+      });
+    },
+
     get port() { return (wss.address() as { port: number }).port; },
     address() { return wss.address() as { port: number }; },
+    get connectionCount() { return connections.size; },
   };
 }

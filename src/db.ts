@@ -61,3 +61,33 @@ export function initDatabase(dbPath: string): Database.Database {
 
   return db;
 }
+
+/**
+ * Flush WAL and close the database cleanly.
+ *
+ * Strategy: PASSIVE checkpoint first (never blocks even with active readers),
+ * then attempt TRUNCATE to reclaim WAL file space. If either fails, log the
+ * error and close anyway — shutdown must never stall on DB issues.
+ */
+export function checkpointAndClose(db: Database.Database): void {
+  try {
+    // PASSIVE: checkpoint as many frames as possible without blocking
+    db.pragma('wal_checkpoint(PASSIVE)');
+  } catch (err) {
+    // Log via stderr since logger may already be torn down
+    process.stderr.write(`[shutdown] WAL PASSIVE checkpoint failed: ${(err as Error).message}\n`);
+  }
+
+  try {
+    // TRUNCATE: try to reclaim WAL file space (may noop if PASSIVE got everything)
+    db.pragma('wal_checkpoint(TRUNCATE)');
+  } catch {
+    // Best-effort — PASSIVE already flushed what it could
+  }
+
+  try {
+    db.close();
+  } catch (err) {
+    process.stderr.write(`[shutdown] DB close failed: ${(err as Error).message}\n`);
+  }
+}
