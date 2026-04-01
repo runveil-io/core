@@ -1,6 +1,13 @@
 import { connect } from '../network/index.js';
 import { open, seal, sign, toHex, fromHex } from '../crypto/index.js';
 import { createLogger } from '../logger.js';
+import {
+  randomizeVersion,
+  randomizeUserAgent,
+  randomJitterMs,
+  randomizeMaxTokens,
+  sleep,
+} from './fingerprint.js';
 
 const log = createLogger('provider');
 import { MODEL_MAP, RETRY_CONFIG } from '../config/bootstrap.js';
@@ -26,6 +33,7 @@ export interface ProviderOptions {
   proxyUrl?: string;      // e.g. http://127.0.0.1:4000
   proxySecret?: string;   // shared secret for proxy auth
   healthPort?: number;    // port for /health endpoint (default 9962)
+  anti_fingerprint?: boolean; // enable fingerprint randomization (default: true)
 }
 
 export interface HandleRequestResult {
@@ -49,6 +57,7 @@ export async function handleRequest(
   onChunk?: (chunk: string) => void,
   apiBase?: string,
   proxySecret?: string,
+  anti_fingerprint: boolean = true,
 ): Promise<HandleRequestResult> {
   const anthropicModel = MODEL_MAP[inner.model] ?? inner.model;
 
@@ -74,9 +83,14 @@ export async function handleRequest(
   log.debug('anthropic_req', { body: anthropicRequest });
   const url = (apiBase ?? 'https://api.anthropic.com') + '/v1/messages';
   const isOAuthToken = apiKey.includes('sk-ant-oat');
+  
+  // Apply fingerprint randomization if enabled
+  const anthropicVersion = anti_fingerprint ? randomizeVersion() : '2023-06-01';
+  const userAgent = anti_fingerprint ? randomizeUserAgent() : 'anthropic-sdk/node-0.26.0';
+  
   const headers: Record<string, string> = {
     'content-type': 'application/json',
-    'anthropic-version': '2023-06-01',
+    'anthropic-version': anthropicVersion,
   };
   
   if (proxySecret) {
@@ -86,7 +100,7 @@ export async function handleRequest(
     headers['Authorization'] = `Bearer ${apiKey}`;
     headers['anthropic-beta'] = 'claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14';
     headers['anthropic-dangerous-direct-browser-access'] = 'true';
-    headers['user-agent'] = 'claude-cli/2.1.75';
+    headers['user-agent'] = userAgent;
     headers['x-app'] = 'cli';
     headers['accept'] = 'application/json';
   } else {
@@ -102,6 +116,19 @@ export async function handleRequest(
       { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
       { type: 'text', text: anthropicRequest.system },
     ];
+  }
+
+  // Apply jitter delay if anti-fingerprint enabled
+  if (anti_fingerprint) {
+    const jitterMs = randomJitterMs();
+    if (jitterMs > 0) {
+      await sleep(jitterMs);
+    }
+  }
+
+  // Apply max_tokens randomization if anti-fingerprint enabled
+  if (anti_fingerprint && anthropicRequest.max_tokens) {
+    anthropicRequest.max_tokens = randomizeMaxTokens(anthropicRequest.max_tokens);
   }
 
   let lastError: Error | null = null;
