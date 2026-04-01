@@ -1,4 +1,4 @@
-import { createWallet, loadWallet, getPublicKeys, encryptApiKey } from './wallet/index.js';
+import { createWallet, loadWallet, getPublicKeys, encryptApiKey, exportWallet, changeWalletPassword, isLegacyWallet, migrateWallet } from './wallet/index.js';
 import { startGateway } from './consumer/index.js';
 import { startProvider } from './provider/index.js';
 import { startRelay } from './relay/index.js';
@@ -151,6 +151,11 @@ async function cmdInit(): Promise<void> {
   output.write(colors.info('Initializing Veil wallet...\n\n'));
 
   const password = await promptPassword('Password (min 8 chars): ');
+  const confirm = await promptPassword('Confirm password: ');
+  if (password !== confirm) {
+    console.error(colors.error('Passwords do not match.'));
+    process.exit(1);
+  }
 
   const spinner = new Spinner('Generating wallet');
   spinner.start();
@@ -730,6 +735,84 @@ async function cmdWitnessExport(): Promise<void> {
   }
 }
 
+async function cmdWalletExport(): Promise<void> {
+  const home = getVeilHome();
+  const password = await promptPassword('Wallet password: ');
+
+  const spinner = new Spinner('Exporting wallet');
+  spinner.start();
+
+  try {
+    const encrypted = await exportWallet(password, home);
+    spinner.stop('Wallet exported', true);
+    output.write('\n');
+    output.write(JSON.stringify(encrypted, null, 2) + '\n');
+  } catch (err) {
+    spinner.stop('Export failed', false);
+    console.error(colors.error((err as Error).message));
+    process.exit(1);
+  }
+}
+
+async function cmdWalletChangePassword(): Promise<void> {
+  const home = getVeilHome();
+  const oldPassword = await promptPassword('Current password: ');
+  const newPassword = await promptPassword('New password (min 8 chars): ');
+  const confirm = await promptPassword('Confirm new password: ');
+
+  if (newPassword !== confirm) {
+    console.error(colors.error('Passwords do not match.'));
+    process.exit(1);
+  }
+
+  const spinner = new Spinner('Changing password');
+  spinner.start();
+
+  try {
+    await changeWalletPassword(oldPassword, newPassword, home);
+    spinner.stop('Password changed', true);
+    output.write('\n');
+    output.write(colors.success('✓ Wallet password updated successfully.\n'));
+  } catch (err) {
+    spinner.stop('Failed to change password', false);
+    console.error(colors.error((err as Error).message));
+    process.exit(1);
+  }
+}
+
+async function cmdWalletMigrate(): Promise<void> {
+  const home = getVeilHome();
+
+  if (!isLegacyWallet(home)) {
+    output.write(colors.info('Wallet is already encrypted. No migration needed.\n'));
+    return;
+  }
+
+  output.write(colors.warning('Legacy unencrypted wallet detected. Migrating to encrypted format.\n\n'));
+
+  const password = await promptPassword('Set encryption password (min 8 chars): ');
+  const confirm = await promptPassword('Confirm password: ');
+
+  if (password !== confirm) {
+    console.error(colors.error('Passwords do not match.'));
+    process.exit(1);
+  }
+
+  const spinner = new Spinner('Migrating wallet');
+  spinner.start();
+
+  try {
+    await migrateWallet(password, home);
+    spinner.stop('Wallet migrated', true);
+    output.write('\n');
+    output.write(colors.success('✓ Wallet encrypted successfully.\n'));
+  } catch (err) {
+    spinner.stop('Migration failed', false);
+    console.error(colors.error((err as Error).message));
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -806,6 +889,27 @@ async function main(): Promise<void> {
           break;
       }
       break;
+    case 'wallet':
+      switch (args[1]) {
+        case 'export':
+          await cmdWalletExport();
+          break;
+        case 'change-password':
+          await cmdWalletChangePassword();
+          break;
+        case 'migrate':
+          await cmdWalletMigrate();
+          break;
+        default:
+          output.write(colors.bold('Wallet Management\n\n'));
+          output.write(colors.dim('Usage: veil wallet <command>\n\n'));
+          output.write(colors.bold('Commands:\n'));
+          output.write(`  ${colors.info('export')}              Export encrypted wallet backup\n`);
+          output.write(`  ${colors.info('change-password')}     Change wallet password\n`);
+          output.write(`  ${colors.info('migrate')}             Migrate legacy wallet to encrypted format\n`);
+          break;
+      }
+      break;
     default:
       output.write(colors.bold('Veil - Decentralized AI Inference Protocol\n\n'));
       output.write(colors.dim('Usage: veil <command>\n\n'));
@@ -817,6 +921,7 @@ async function main(): Promise<void> {
       output.write(`  ${colors.info('status')}          Check status\n`);
       output.write(`  ${colors.info('relays')}          List available relays\n`);
       output.write(`  ${colors.info('witness')}         Witness log\n`);
+      output.write(`  ${colors.info('wallet')}          Wallet management\n`);
       output.write(`  ${colors.info('rbob')}            RBOB points ledger\n`);
       break;
   }
