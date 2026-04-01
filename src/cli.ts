@@ -3,7 +3,9 @@ import { startGateway } from './consumer/index.js';
 import { startProvider } from './provider/index.js';
 import { startRelay } from './relay/index.js';
 import { RbobLedger } from './rbob/index.js';
-import { DEFAULT_GATEWAY_PORT, DEFAULT_RELAY_PORT, OFFICIAL_RELAY_URL, MODEL_MAP } from './config/bootstrap.js';
+import { DEFAULT_GATEWAY_PORT, DEFAULT_RELAY_PORT, OFFICIAL_RELAY_URL, MODEL_MAP, DEFAULT_BOOTSTRAP_URL, RELAY_DISCOVERY_CACHE_TTL_MS, RELAY_DISCOVERY_MAX_RELAYS } from './config/bootstrap.js';
+import type { RelayDiscoveryMode } from './config/bootstrap.js';
+import { RelayDiscoveryClient } from './discovery/client.js';
 import { loadAndValidateConfig, loadAndValidateProviderConfig } from './config/validator.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -300,7 +302,16 @@ async function cmdProvideStart(): Promise<void> {
   }
 
   const relayUrl = config.relay_url ?? OFFICIAL_RELAY_URL;
-  
+  const discoveryMode = (config.relay_discovery as RelayDiscoveryMode | undefined) ?? 'static';
+  let discoveryClient: RelayDiscoveryClient | undefined;
+  if (discoveryMode === 'bootstrap') {
+    discoveryClient = new RelayDiscoveryClient({
+      bootstrapUrl: (config.bootstrap_url as string) ?? DEFAULT_BOOTSTRAP_URL,
+      cacheTtlMs: RELAY_DISCOVERY_CACHE_TTL_MS,
+      maxRelays: RELAY_DISCOVERY_MAX_RELAYS,
+    });
+  }
+
   spinner.start('Connecting to relay');
   const provider = await startProvider({
     wallet,
@@ -309,6 +320,7 @@ async function cmdProvideStart(): Promise<void> {
     maxConcurrent: providerConfig.max_concurrent ?? 5,
     proxyUrl: process.env.PROXY_URL,
     proxySecret: process.env.PROXY_SECRET,
+    discoveryClient,
   });
   spinner.stop('Connected to relay', true);
 
@@ -579,6 +591,60 @@ async function cmdRbobExport(): Promise<void> {
   }
 }
 
+async function cmdRelays(): Promise<void> {
+  const home = getVeilHome();
+  let config: Record<string, unknown>;
+  try {
+    config = loadAndValidateConfig(home);
+  } catch {
+    // Use defaults if no config
+    config = {};
+  }
+
+  const bootstrapUrl = (config.bootstrap_url as string) ?? DEFAULT_BOOTSTRAP_URL;
+  const client = new RelayDiscoveryClient({
+    bootstrapUrl,
+    cacheTtlMs: RELAY_DISCOVERY_CACHE_TTL_MS,
+    maxRelays: RELAY_DISCOVERY_MAX_RELAYS,
+  });
+
+  const spinner = new Spinner('Fetching relays from bootstrap');
+  spinner.start();
+
+  try {
+    const relays = await client.fetchRelays();
+    spinner.stop(`Found ${relays.length} relay(s)`, true);
+
+    if (relays.length === 0) {
+      output.write(colors.dim('No relays available.\n'));
+      return;
+    }
+
+    output.write('\n');
+    output.write(colors.bold('Available Relays\n'));
+    output.write(colors.dim('─'.repeat(80)) + '\n');
+
+    const rows = relays.map((r) => [
+      colors.info(r.relay_id.slice(0, 12)),
+      r.endpoint,
+      r.region,
+      String(r.active_providers),
+      `${r.uptime_pct.toFixed(1)}%`,
+      `${(r.fee_pct * 100).toFixed(1)}%`,
+      String(r.capacity),
+    ]);
+
+    output.write(
+      formatTable(rows, ['ID', 'Endpoint', 'Region', 'Providers', 'Uptime', 'Fee', 'Capacity']) + '\n',
+    );
+    output.write('\n');
+  } catch (err) {
+    spinner.stop('Failed to fetch relays', false);
+    console.error(colors.error((err as Error).message));
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -601,6 +667,9 @@ async function main(): Promise<void> {
         console.error('Usage: veil relay start [--port 8080]');
         process.exit(1);
       }
+      break;
+    case 'relays':
+      await cmdRelays();
       break;
     case 'status':
       await cmdStatus();
@@ -639,6 +708,7 @@ async function main(): Promise<void> {
       output.write(`  ${colors.info('provide start')}   Start Provider\n`);
       output.write(`  ${colors.info('relay start')}     Start Relay server\n`);
       output.write(`  ${colors.info('status')}          Check status\n`);
+      output.write(`  ${colors.info('relays')}          List available relays\n`);
       output.write(`  ${colors.info('rbob')}            RBOB points ledger\n`);
       break;
   }

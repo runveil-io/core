@@ -1,4 +1,9 @@
 export const OFFICIAL_RELAY_URL = 'wss://relay-jp.runveil.io';
+export const DEFAULT_BOOTSTRAP_URL = 'https://bootstrap.runveil.io';
+export const RELAY_DISCOVERY_CACHE_TTL_MS = 60_000; // 60s
+export const RELAY_DISCOVERY_MAX_RELAYS = 20;
+
+export type RelayDiscoveryMode = 'bootstrap' | 'static' | 'manual';
 export const PROTOCOL_VERSION = 1;
 export const DEFAULT_GATEWAY_PORT = 9960;
 export const DEFAULT_RELAY_PORT = 8080;

@@ -21,6 +21,7 @@ export interface RelayOptions {
   port: number;
   wallet: Wallet;
   dbPath: string;
+  bootstrapUrl?: string;
 }
 
 interface ConnectedProvider {
@@ -119,7 +120,8 @@ export function createWitness(
 }
 
 export async function startRelay(options: RelayOptions): Promise<{ close(): Promise<void> }> {
-  const { port, wallet, dbPath } = options;
+  const { port, wallet, dbPath, bootstrapUrl } = options;
+  let heartbeatInterval: NodeJS.Timeout | null = null;
   const db = initDatabase(dbPath);
   const providers = new Map<string, ConnectedProvider>();
   const consumers = new Map<string, Connection>(); // request_id -> consumer conn
@@ -385,8 +387,71 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
   log.info('relay_started', { port: server.port });
 
+  // Bootstrap registration
+  if (bootstrapUrl) {
+    const relayPubkey = toHex(wallet.signingPublicKey);
+    const relayEndpoint = `wss://0.0.0.0:${server.port}`;
+
+    const registerPayload = {
+      relay_pubkey: relayPubkey,
+      relay_id: relayPubkey.slice(0, 16),
+      endpoint: relayEndpoint,
+      models_supported: Object.keys(await import('../config/bootstrap.js').then(m => m.MODEL_MAP)),
+      fee_pct: 0,
+      region: process.env['VEIL_RELAY_REGION'] ?? 'unknown',
+      capacity: 100,
+      version: '0.1.0',
+    };
+
+    async function registerWithBootstrap(): Promise<void> {
+      try {
+        const ts = Date.now();
+        const signable = JSON.stringify({ ...registerPayload, timestamp: ts });
+        const sig = sign(new TextEncoder().encode(signable), wallet.signingSecretKey);
+
+        const res = await fetch(`${bootstrapUrl}/v1/relays/register`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            ...registerPayload,
+            timestamp: ts,
+            signature: toHex(sig),
+          }),
+        });
+        if (!res.ok) {
+          log.warn('bootstrap_register_failed', { status: res.status });
+        } else {
+          log.info('bootstrap_registered');
+        }
+      } catch (err) {
+        log.warn('bootstrap_register_error', { error: (err as Error).message });
+      }
+    }
+
+    // Initial registration
+    await registerWithBootstrap();
+
+    // Heartbeat every 30s
+    heartbeatInterval = setInterval(() => {
+      registerWithBootstrap().catch(() => {});
+    }, 30_000);
+  }
+
   return {
     async close(): Promise<void> {
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+
+      // Deregister from bootstrap
+      if (bootstrapUrl) {
+        const relayPubkey = toHex(wallet.signingPublicKey);
+        try {
+          await fetch(`${bootstrapUrl}/v1/relays/${relayPubkey}`, { method: 'DELETE' });
+          log.info('bootstrap_deregistered');
+        } catch {
+          // Best effort
+        }
+      }
+
       server.close();
       db.close();
     },

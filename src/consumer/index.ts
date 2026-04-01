@@ -24,12 +24,14 @@ import type {
   ErrorPayload,
   ProviderListPayload,
 } from '../types.js';
+import type { RelayDiscoveryClient } from '../discovery/client.js';
 
 export interface GatewayOptions {
   port: number;
   wallet: Wallet;
   relayUrl: string;
   apiKey?: string;
+  discoveryClient?: RelayDiscoveryClient;
 }
 
 const startTime = Date.now();
@@ -69,11 +71,32 @@ export async function startGateway(options: GatewayOptions): Promise<{
   }>();
 
   let relayConn: Connection | null = null;
+  let currentRelayUrl = relayUrl;
+  const excludedRelays: string[] = [];
+
+  async function resolveRelayUrl(): Promise<string> {
+    if (!options.discoveryClient) return relayUrl;
+    try {
+      const selected = await options.discoveryClient.selectRelay(excludedRelays);
+      if (selected) {
+        log.info('discovery_selected_relay', {
+          relay: selected.relay.relay_id,
+          endpoint: selected.relay.endpoint,
+          score: selected.score.toFixed(1),
+        });
+        return selected.relay.endpoint;
+      }
+    } catch (err) {
+      log.warn('discovery_failed_fallback', { error: (err as Error).message });
+    }
+    return relayUrl; // fallback
+  }
 
   async function connectRelay(): Promise<void> {
     try {
+      currentRelayUrl = await resolveRelayUrl();
       relayConn = await connect({
-        url: relayUrl,
+        url: currentRelayUrl,
         onMessage(msg: WsMessage) {
           if (msg.type === 'provider_list') {
             providers = (msg.payload as ProviderListPayload).providers;
@@ -106,6 +129,12 @@ export async function startGateway(options: GatewayOptions): Promise<{
         onClose() {
           relayConnected = false;
           log.warn('relay_disconnected');
+          if (options.discoveryClient) {
+            // Try to failover to a different relay
+            excludedRelays.push(currentRelayUrl);
+            log.info('discovery_failover', { excluded: excludedRelays.length });
+            // Reconnect will be handled by the reconnect option
+          }
         },
         onError(err) {
           log.error('relay_error', { error: err.message });
