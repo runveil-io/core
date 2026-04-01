@@ -1,4 +1,4 @@
-import { config } from '../config/index.js';
+import { RELAY_RATE_LIMIT } from '../config/index.js';
 
 const DEFAULT_RATE_LIMIT = 60;
 const WINDOW_MS = 60_000;
@@ -15,7 +15,7 @@ export class SlidingWindowRateLimiter {
   private readonly cleanupInterval: ReturnType<typeof setInterval>;
 
   constructor(limit?: number, windowMs?: number) {
-    this.limit = limit ?? (config.relayRateLimit ?? DEFAULT_RATE_LIMIT);
+    this.limit = limit ?? (RELAY_RATE_LIMIT);
     this.windowMs = windowMs ?? WINDOW_MS;
     this.store = new Map();
 
@@ -72,6 +72,9 @@ export class SlidingWindowRateLimiter {
     this.store.clear();
   }
 
+  injectTimestamps(pubkey: string, timestamps: number[]): void {
+    this.store.set(pubkey, [...timestamps]);
+  }
   getStore(): ReadonlyMap<string, number[]> {
     return this.store;
   }
@@ -80,3 +83,4 @@ export class SlidingWindowRateLimiter {
 export function createRateLimiter(limit?: number, windowMs?: number): SlidingWindowRateLimiter {
   return new SlidingWindowRateLimiter(limit, windowMs);
 }
+
