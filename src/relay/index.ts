@@ -7,7 +7,7 @@ const log = createLogger('relay');
 import { initDatabase } from '../db.js';
 import { verify, sign, sha256, toHex, fromHex } from '../crypto/index.js';
 import { RateLimiter } from './rate_limiter.js';
-import { MAX_REQUEST_AGE_MS } from '../config/bootstrap.js';
+import { MAX_REQUEST_AGE_MS, PROTOCOL_VERSION } from '../config/bootstrap.js';
 import type {
   WsMessage,
   ProviderHelloPayload,
@@ -182,6 +182,26 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
       return;
     }
 
+    // Protocol version negotiation
+    const clientVersion = (payload as { protocol_version?: string }).protocol_version ?? '0';
+    const clientMajor = parseInt(clientVersion.split('.')[0] ?? '0', 10);
+    const supportedMajor = PROTOCOL_VERSION;
+
+    if (!Number.isFinite(clientMajor) || clientMajor !== supportedMajor) {
+      const ackPayload = {
+        status: 'rejected' as const,
+        reason: `protocol_version_incompatible: client=${clientVersion}, server=${supportedMajor}`,
+      };
+      conn.send({ type: 'provider_ack', payload: ackPayload, timestamp: Date.now() });
+      conn.close();
+      log.warn('provider_rejected_version_incompatible', {
+        provider: payload.provider_pubkey.slice(0, 8),
+        clientVersion,
+        supportedVersion: supportedMajor.toString(),
+      });
+      return;
+    }
+
     const info: ProviderInfo = {
       provider_id: payload.provider_pubkey,
       encryption_pubkey: payload.encryption_pubkey,
@@ -202,7 +222,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
     conn.send({
       type: 'provider_ack',
-      payload: { status: 'accepted' },
+      payload: { status: 'accepted', negotiated_version: PROTOCOL_VERSION.toString() },
       timestamp: Date.now(),
     });
 
