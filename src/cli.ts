@@ -2,6 +2,7 @@ import { createWallet, loadWallet, getPublicKeys, encryptApiKey } from './wallet
 import { startGateway } from './consumer/index.js';
 import { startProvider } from './provider/index.js';
 import { startRelay } from './relay/index.js';
+import { RbobLedger } from './rbob/index.js';
 import { DEFAULT_GATEWAY_PORT, DEFAULT_RELAY_PORT, OFFICIAL_RELAY_URL, MODEL_MAP } from './config/bootstrap.js';
 import { loadAndValidateConfig, loadAndValidateProviderConfig } from './config/validator.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -440,6 +441,144 @@ async function cmdStatus(): Promise<void> {
   output.write('\n');
 }
 
+// ============== RBOB Commands ==============
+
+function getRbobDbPath(): string {
+  const home = getVeilHome();
+  return join(home, 'data', 'rbob.db');
+}
+
+async function cmdRbobBalance(): Promise<void> {
+  const contributor = process.argv[4];
+  if (!contributor) {
+    console.error(colors.error('Usage: veil rbob balance <contributor>'));
+    process.exit(1);
+  }
+
+  const ledger = new RbobLedger(getRbobDbPath());
+  try {
+    const result = ledger.balance(contributor);
+    output.write('\n');
+    output.write(colors.bold(`RBOB Balance: ${contributor}\n`));
+    output.write(colors.dim('─'.repeat(50)) + '\n');
+    output.write(`  ${colors.bold('Total points:')}    ${colors.success(String(result.total_points))}\n`);
+    output.write(`  ${colors.bold('Contributions:')}   ${colors.info(String(result.entries))}\n`);
+
+    const history = ledger.history(contributor);
+    if (history.length > 0) {
+      output.write('\n');
+      output.write(colors.bold('Recent activity:\n'));
+      const rows = history.slice(0, 10).map((e) => [
+        e.pr_number ? `PR #${e.pr_number}` : '—',
+        colors.success(`+${e.points}`),
+        e.multiplier !== 1 ? colors.warning(`${e.multiplier}x`) : '1x',
+        e.reason,
+      ]);
+      output.write(formatTable(rows, ['PR', 'Points', 'Mult', 'Reason']) + '\n');
+    }
+    output.write('\n');
+  } finally {
+    ledger.close();
+  }
+}
+
+async function cmdRbobLeaderboard(): Promise<void> {
+  const ledger = new RbobLedger(getRbobDbPath());
+  try {
+    const entries = ledger.leaderboard(20);
+    if (entries.length === 0) {
+      output.write(colors.dim('No contributions yet.\n'));
+      return;
+    }
+
+    output.write('\n');
+    output.write(colors.bold('RBOB Leaderboard — Top 20\n'));
+    output.write(colors.dim('─'.repeat(60)) + '\n');
+
+    const rows = entries.map((e) => [
+      colors.dim(`#${e.rank}`),
+      colors.bold(e.contributor),
+      colors.success(String(e.total_points)),
+      colors.dim(String(e.contributions)),
+    ]);
+    output.write(formatTable(rows, ['Rank', 'Contributor', 'Points', 'PRs']) + '\n');
+    output.write('\n');
+  } finally {
+    ledger.close();
+  }
+}
+
+async function cmdRbobGrant(): Promise<void> {
+  const contributor = process.argv[4];
+  const pointsStr = process.argv[5];
+  const reason = process.argv.slice(6).join(' ');
+
+  if (!contributor || !pointsStr || !reason) {
+    console.error(colors.error('Usage: veil rbob grant <contributor> <points> <reason>'));
+    process.exit(1);
+  }
+
+  const points = Number(pointsStr);
+  if (!Number.isFinite(points) || points <= 0) {
+    console.error(colors.error('Points must be a positive number.'));
+    process.exit(1);
+  }
+
+  const home = getVeilHome();
+  const password = await promptPassword('Admin wallet password: ');
+
+  const spinner = new Spinner('Loading admin wallet');
+  spinner.start();
+
+  let wallet;
+  try {
+    wallet = await loadWallet(password, home);
+    spinner.stop('Wallet loaded', true);
+  } catch {
+    spinner.stop('Failed to load wallet', false);
+    process.exit(1);
+  }
+
+  // Parse optional flags
+  const prIdx = process.argv.indexOf('--pr');
+  const prNumber = prIdx !== -1 ? Number(process.argv[prIdx + 1]) : undefined;
+  const multIdx = process.argv.indexOf('--multiplier');
+  const multiplier = multIdx !== -1 ? Number(process.argv[multIdx + 1]) : undefined;
+
+  const ledger = new RbobLedger(getRbobDbPath());
+  try {
+    const entry = ledger.grant(
+      { contributor, points, reason, pr_number: prNumber, multiplier },
+      wallet.signingSecretKey,
+      wallet.signingPublicKey,
+    );
+
+    output.write('\n');
+    output.write(colors.success('✓ Points granted!\n\n'));
+    output.write(`  ${colors.bold('Contributor:')}  ${colors.info(contributor)}\n`);
+    output.write(`  ${colors.bold('Points:')}       ${colors.success(`+${entry.points}`)}\n`);
+    output.write(`  ${colors.bold('Multiplier:')}   ${entry.multiplier}x\n`);
+    output.write(`  ${colors.bold('Reason:')}       ${reason}\n`);
+    if (prNumber) output.write(`  ${colors.bold('PR:')}           #${prNumber}\n`);
+    output.write(`  ${colors.bold('Signed:')}       ${colors.dim(entry.admin_signature!.slice(0, 16) + '...')}\n`);
+    output.write('\n');
+  } finally {
+    ledger.close();
+  }
+}
+
+async function cmdRbobExport(): Promise<void> {
+  const ledger = new RbobLedger(getRbobDbPath());
+  try {
+    const data = ledger.exportJSON();
+    const outPath = process.argv[4] ?? 'rbob-export.json';
+    writeFileSync(outPath, JSON.stringify(data, null, 2));
+    output.write(colors.success(`✓ Exported ${data.entries.length} entries to ${outPath}\n`));
+  } finally {
+    ledger.close();
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const cmd = args[0];
@@ -466,6 +605,31 @@ async function main(): Promise<void> {
     case 'status':
       await cmdStatus();
       break;
+    case 'rbob':
+      switch (args[1]) {
+        case 'balance':
+          await cmdRbobBalance();
+          break;
+        case 'leaderboard':
+          await cmdRbobLeaderboard();
+          break;
+        case 'grant':
+          await cmdRbobGrant();
+          break;
+        case 'export':
+          await cmdRbobExport();
+          break;
+        default:
+          output.write(colors.bold('RBOB Points Ledger\n\n'));
+          output.write(colors.dim('Usage: veil rbob <command>\n\n'));
+          output.write(colors.bold('Commands:\n'));
+          output.write(`  ${colors.info('balance <contributor>')}           Show total points\n`);
+          output.write(`  ${colors.info('leaderboard')}                    Top 20 contributors\n`);
+          output.write(`  ${colors.info('grant <contributor> <pts> <reason>')}  Grant points (admin)\n`);
+          output.write(`  ${colors.info('export [path]')}                  Export JSON for on-chain migration\n`);
+          break;
+      }
+      break;
     default:
       output.write(colors.bold('Veil - Decentralized AI Inference Protocol\n\n'));
       output.write(colors.dim('Usage: veil <command>\n\n'));
@@ -475,6 +639,7 @@ async function main(): Promise<void> {
       output.write(`  ${colors.info('provide start')}   Start Provider\n`);
       output.write(`  ${colors.info('relay start')}     Start Relay server\n`);
       output.write(`  ${colors.info('status')}          Check status\n`);
+      output.write(`  ${colors.info('rbob')}            RBOB points ledger\n`);
       break;
   }
 }
