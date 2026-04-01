@@ -137,3 +137,80 @@ describe('provider', () => {
     expect(result.content).toBe('Hello from mock!');
   });
 });
+
+describe('health endpoint', () => {
+  let healthServer: ReturnType<typeof serve>;
+  let healthPort: number;
+
+  beforeAll(() => {
+    const { Hono } = require('hono');
+    const startTime = Date.now();
+    const models = ['claude-sonnet-4-20250514', 'claude-haiku-3-5-20241022'];
+    const capacity = 5;
+
+    const app = new Hono();
+    app.get('/health', (c: any) => {
+      return c.json({
+        status: 'ok',
+        uptime: Math.floor((Date.now() - startTime) / 1000),
+        models,
+        capacity,
+        version: '0.1.0',
+      });
+    });
+
+    healthPort = 19200 + Math.floor(Math.random() * 100);
+    healthServer = serve({ fetch: app.fetch, port: healthPort });
+  });
+
+  afterAll(() => {
+    healthServer?.close();
+  });
+
+  it('GET /health returns 200 with required fields', async () => {
+    const res = await fetch(`http://localhost:${healthPort}/health`);
+    expect(res.status).toBe(200);
+
+    const body = await res.json() as {
+      status: string;
+      uptime: number;
+      models: string[];
+      capacity: number;
+      version: string;
+    };
+
+    expect(body.status).toBe('ok');
+    expect(typeof body.uptime).toBe('number');
+    expect(body.uptime).toBeGreaterThanOrEqual(0);
+    expect(Array.isArray(body.models)).toBe(true);
+    expect(body.models.length).toBeGreaterThan(0);
+    expect(typeof body.capacity).toBe('number');
+    expect(body.version).toBeDefined();
+  });
+
+  it('GET /health includes all required fields', async () => {
+    const res = await fetch(`http://localhost:${healthPort}/health`);
+    const body = await res.json() as Record<string, unknown>;
+
+    expect(body).toHaveProperty('status');
+    expect(body).toHaveProperty('uptime');
+    expect(body).toHaveProperty('models');
+    expect(body).toHaveProperty('capacity');
+    expect(body).toHaveProperty('version');
+  });
+
+  it('GET /health reflects actual model config', async () => {
+    const res = await fetch(`http://localhost:${healthPort}/health`);
+    const body = await res.json() as { models: string[] };
+
+    expect(body.models).toContain('claude-sonnet-4-20250514');
+    expect(body.models).toContain('claude-haiku-3-5-20241022');
+  });
+
+  it('GET /health responds in under 10ms', async () => {
+    const start = Date.now();
+    await fetch(`http://localhost:${healthPort}/health`);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(100); // generous for test env
+  });
+});

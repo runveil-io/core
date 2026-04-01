@@ -1,6 +1,8 @@
 import { connect } from '../network/index.js';
 import { open, seal, sign, toHex, fromHex } from '../crypto/index.js';
 import { MODEL_MAP, RETRY_CONFIG } from '../config/bootstrap.js';
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
 import type { Connection } from '../network/index.js';
 import type { Wallet } from '../wallet/index.js';
 import type {
@@ -10,6 +12,9 @@ import type {
   StreamChunkPayload,
 } from '../types.js';
 
+const PROVIDER_VERSION = '0.1.0';
+const DEFAULT_HEALTH_PORT = 9962;
+
 export interface ProviderOptions {
   wallet: Wallet;
   relayUrl: string;
@@ -17,6 +22,7 @@ export interface ProviderOptions {
   maxConcurrent: number;
   proxyUrl?: string;      // e.g. http://127.0.0.1:4000
   proxySecret?: string;   // shared secret for proxy auth
+  healthPort?: number;    // port for /health endpoint (default 9962)
 }
 
 export interface HandleRequestResult {
@@ -389,8 +395,36 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
     }
   }
 
+  // Start health HTTP server
+  const startTime = Date.now();
+  const healthPort = options.healthPort
+    ?? (process.env['VEIL_PROVIDER_HEALTH_PORT'] ? Number(process.env['VEIL_PROVIDER_HEALTH_PORT']) : undefined)
+    ?? DEFAULT_HEALTH_PORT;
+  const healthModels = Object.keys(MODEL_MAP);
+  const capacity = options.maxConcurrent;
+
+  const healthApp = new Hono();
+  healthApp.get('/health', (c) => {
+    return c.json({
+      status: 'ok',
+      uptime: Math.floor((Date.now() - startTime) / 1000),
+      models: healthModels,
+      capacity,
+      version: PROVIDER_VERSION,
+    });
+  });
+
+  let healthServer: ReturnType<typeof serve> | undefined;
+  try {
+    healthServer = serve({ fetch: healthApp.fetch, port: healthPort });
+    console.log(JSON.stringify({ level: 'info', msg: 'health_server_started', port: healthPort }));
+  } catch (err) {
+    console.log(JSON.stringify({ level: 'warn', msg: 'health_server_failed', error: (err as Error).message }));
+  }
+
   return {
     async close(): Promise<void> {
+      healthServer?.close();
       conn.close();
     },
   };
