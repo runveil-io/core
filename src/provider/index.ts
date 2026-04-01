@@ -15,9 +15,11 @@ import type {
   InnerPlaintext,
   StreamChunkPayload,
 } from '../types.js';
+import type { RelayDiscoveryClient } from '../discovery/client.js';
 
 const PROVIDER_VERSION = '0.1.0';
 const DEFAULT_HEALTH_PORT = 9962;
+const MULTI_RELAY_COUNT = 3;
 
 export interface ProviderOptions {
   wallet: Wallet;
@@ -27,6 +29,7 @@ export interface ProviderOptions {
   proxyUrl?: string;      // e.g. http://127.0.0.1:4000
   proxySecret?: string;   // shared secret for proxy auth
   healthPort?: number;    // port for /health endpoint (default 9962)
+  discoveryClient?: RelayDiscoveryClient;
 }
 
 export interface HandleRequestResult {
@@ -208,13 +211,14 @@ export async function handleRequest(
 }
 
 export async function startProvider(options: ProviderOptions): Promise<{ close(): Promise<void> }> {
-  const { wallet, relayUrl, apiKeys, maxConcurrent, proxyUrl, proxySecret } = options;
+  const { wallet, relayUrl, apiKeys, maxConcurrent, proxyUrl, proxySecret, discoveryClient } = options;
   const apiKey = proxyUrl ? 'proxy' : apiKeys.find((k) => k.provider === 'anthropic')?.key;
   if (!apiKey && !proxyUrl) throw new Error('No Anthropic API key or proxy configured');
   const apiBase = proxyUrl ?? undefined;
 
   let activeRequests = 0;
   const metrics = new MetricsStore();
+  const extraConnections: Connection[] = [];
 
   const conn = await connect({
     url: relayUrl,
@@ -255,22 +259,81 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
   });
 
   // Send provider_hello
-  const models = Object.keys(MODEL_MAP);
-  const helloPayload = {
-    provider_pubkey: toHex(wallet.signingPublicKey),
-    encryption_pubkey: toHex(wallet.encryptionPublicKey),
-    models,
-    capacity: 100,
-  };
-  const timestamp = Date.now();
-  const signable = JSON.stringify({ ...helloPayload, timestamp });
-  const signature = sign(new TextEncoder().encode(signable), wallet.signingSecretKey);
+  function sendProviderHello(c: Connection): void {
+    const models = Object.keys(MODEL_MAP);
+    const helloPayload = {
+      provider_pubkey: toHex(wallet.signingPublicKey),
+      encryption_pubkey: toHex(wallet.encryptionPublicKey),
+      models,
+      capacity: 100,
+    };
+    const ts = Date.now();
+    const signable = JSON.stringify({ ...helloPayload, timestamp: ts });
+    const sig = sign(new TextEncoder().encode(signable), wallet.signingSecretKey);
+    c.send({
+      type: 'provider_hello',
+      payload: { ...helloPayload, signature: toHex(sig) },
+      timestamp: ts,
+    });
+  }
 
-  conn.send({
-    type: 'provider_hello',
-    payload: { ...helloPayload, signature: toHex(signature) },
-    timestamp,
-  });
+  sendProviderHello(conn);
+
+  // If discovery client is available, connect to additional relays for wider reachability
+  if (discoveryClient) {
+    try {
+      const relays = await discoveryClient.fetchRelays();
+      const additionalRelays = relays
+        .filter((r) => r.endpoint !== relayUrl && r.capacity > 0)
+        .slice(0, MULTI_RELAY_COUNT - 1);
+
+      for (const relay of additionalRelays) {
+        try {
+          const extraConn = await connect({
+            url: relay.endpoint,
+            onMessage(msg: WsMessage) {
+              if (msg.type === 'provider_ack') {
+                const payload = msg.payload as { status: string; reason?: string };
+                if (payload.status === 'rejected') {
+                  log.error('extra_relay_rejected', { relay: relay.relay_id, reason: payload.reason });
+                } else {
+                  log.info('extra_relay_accepted', { relay: relay.relay_id });
+                }
+                return;
+              }
+              if (msg.type === 'request') {
+                if (activeRequests >= maxConcurrent) {
+                  extraConn.send({
+                    type: 'error',
+                    request_id: msg.request_id,
+                    payload: { code: 'rate_limit', message: 'Provider at capacity' },
+                    timestamp: Date.now(),
+                  });
+                  return;
+                }
+                handleIncomingRequest(msg).catch((err) => {
+                  log.error('request_error', { error: (err as Error).message });
+                });
+              }
+            },
+            onClose(_code, _reason) {
+              log.warn('extra_relay_disconnected', { relay: relay.relay_id });
+            },
+            onError(err) {
+              log.error('extra_relay_error', { relay: relay.relay_id, error: err.message });
+            },
+          });
+          sendProviderHello(extraConn);
+          extraConnections.push(extraConn);
+          log.info('extra_relay_connected', { relay: relay.relay_id, endpoint: relay.endpoint });
+        } catch (err) {
+          log.warn('extra_relay_connect_failed', { relay: relay.relay_id, error: (err as Error).message });
+        }
+      }
+    } catch (err) {
+      log.warn('discovery_multi_relay_failed', { error: (err as Error).message });
+    }
+  }
 
   async function handleIncomingRequest(msg: WsMessage): Promise<void> {
     const requestStart = Date.now();
@@ -442,6 +505,9 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
   return {
     async close(): Promise<void> {
       healthServer?.close();
+      for (const ec of extraConnections) {
+        ec.close();
+      }
       conn.close();
     },
   };
