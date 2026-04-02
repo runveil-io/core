@@ -291,7 +291,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
       return errorResponse(`Model '${body.model}' not available`, 'invalid_request_error', 'model_not_found', 404);
     }
 
-    if (!relayConn || relayConn.readyState !== 'open') {
+    if (!relayConn || relayConn.readyState !== 'connected') {
       return errorResponse('Relay not connected', 'api_error', null, 502);
     }
 
@@ -562,6 +562,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
             
             return httpResolve(resp);
           } catch (err: any) {
+            console.error('catched error:', err);
             const msg = err.message;
             if (msg.includes('invalid_request') || msg.includes('rate_limit') || msg.includes('invalid_signature') || msg.includes('decrypt_failed') || attempts === 3) {
               if (msg.includes('no_provider') || msg.includes('no_providers')) {
@@ -596,6 +597,9 @@ export async function startGateway(options: GatewayOptions): Promise<{
       server.close();
       relayConn?.close();
     },
-    port,
+    get port() {
+      const addr = server.address();
+      return addr && typeof addr === 'object' ? addr.port : port;
+    },
   };
 }

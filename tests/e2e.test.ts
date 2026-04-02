@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import WebSocket from 'ws';
+import { readFileSync } from 'node:fs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -70,17 +72,17 @@ describe('e2e', () => {
       });
     });
 
-    mockAnthropicPort = 18700 + Math.floor(Math.random() * 100);
-    mockAnthropicServer = serve({ fetch: anthropicApp.fetch, port: mockAnthropicPort });
+    mockAnthropicServer = serve({ fetch: anthropicApp.fetch, port: 0 });
+    mockAnthropicPort = (mockAnthropicServer as any).address().port;
 
     // 2. Start Relay
-    relayPort = 18600 + Math.floor(Math.random() * 100);
     const relayWallet = makeWallet();
     relayHandle = await startRelay({
-      port: relayPort,
+      port: 0,
       wallet: relayWallet,
       dbPath: join(tempDir, 'e2e-relay.db'),
     });
+    relayPort = (relayHandle as any).port;
 
     // 3. Start Provider (connects to Relay, uses mock Anthropic)
     const providerWallet = makeWallet();
@@ -92,9 +94,11 @@ describe('e2e', () => {
 
     providerHandle = await startProvider({
       wallet: providerWallet,
-      relayUrl: `ws://localhost:${relayPort}`,
+      relayUrl: `ws://127.0.0.1:${relayPort}`,
       apiKeys: [{ provider: 'anthropic', key: 'test-key' }],
       maxConcurrent: 5,
+      healthPort: 0,
+      proxyUrl: `http://127.0.0.1:${mockAnthropicPort}`,
     });
 
     // Wait for provider registration
@@ -102,12 +106,12 @@ describe('e2e', () => {
 
     // 4. Start Consumer Gateway (connects to Relay)
     const consumerWallet = makeWallet();
-    gatewayPort = 18500 + Math.floor(Math.random() * 100);
     gatewayHandle = await startGateway({
-      port: gatewayPort,
+      port: 0,
       wallet: consumerWallet,
-      relayUrl: `ws://localhost:${relayPort}`,
+      relayUrl: `ws://127.0.0.1:${relayPort}`,
     });
+    gatewayPort = gatewayHandle.port;
 
     // Wait for consumer to get provider list
     await new Promise((r) => setTimeout(r, 500));
@@ -122,7 +126,7 @@ describe('e2e', () => {
   });
 
   it('full flow: Consumer HTTP -> Relay -> Provider -> response', async () => {
-    const res = await fetch(`http://localhost:${gatewayPort}/v1/chat/completions`, {
+    const res = await fetch(`http://127.0.0.1:${gatewayPort}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -130,17 +134,15 @@ describe('e2e', () => {
         messages: [{ role: 'user', content: 'test' }],
       }),
     });
-
-    // Provider calls real Anthropic (not mock) in current setup
-    // since handleRequest doesn't use MOCK_ANTHROPIC_PORT.
-    // This test validates the gateway->relay->provider pipeline.
-    // With no real API key, provider will get an error.
-    // We expect either 200 (if everything works) or 500/503 (if API fails)
-    expect([200, 500, 502, 503]).toContain(res.status);
+    const textContext = await res.clone().text();
+    console.log('body is', textContext);
+    expect(res.status).toBe(200);
+    const body: any = await res.json();
+    expect(body.choices[0].message.content).toBe('E2E works!');
   });
 
   it('full streaming flow', async () => {
-    const res = await fetch(`http://localhost:${gatewayPort}/v1/chat/completions`, {
+    const res = await fetch(`http://127.0.0.1:${gatewayPort}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -150,8 +152,7 @@ describe('e2e', () => {
       }),
     });
 
-    // Same caveat: without real API key, this may error
-    expect([200, 500, 502, 503]).toContain(res.status);
+    expect(res.status).toBe(200);
 
     if (res.status === 200) {
       const text = await res.text();
@@ -160,9 +161,9 @@ describe('e2e', () => {
     }
   });
 
-  it('first token latency < 2000ms over localhost', async () => {
+  it('first token latency < 2000ms over 127.0.0.1', async () => {
     const start = Date.now();
-    const res = await fetch(`http://localhost:${gatewayPort}/v1/chat/completions`, {
+    const res = await fetch(`http://127.0.0.1:${gatewayPort}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -177,36 +178,90 @@ describe('e2e', () => {
       const { value } = await reader.read();
       const firstTokenTime = Date.now() - start;
       reader.cancel();
-      // Over localhost with mock, should be well under 2s
       expect(firstTokenTime).toBeLessThan(2000);
     } else {
-      // If provider has no real API key, just verify the response came fast
-      const elapsed = Date.now() - start;
-      expect(elapsed).toBeLessThan(2000);
+      expect(res.status).toBe(200);
     }
+  });
+
+  it('Auth failure: bad signing key rejected by relay', async () => {
+    return new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${relayPort}`);
+      ws.on('open', () => {
+        const msg = {
+          type: 'request',
+          request_id: 'bad-request-1',
+          payload: {
+            outer: {
+              consumer_pubkey: 'A'.repeat(64),
+              provider_id: 'B'.repeat(64),
+              model: 'claude-sonnet-4-20250514',
+              signature: 'C'.repeat(128)
+            },
+            inner: 'ABCD'
+          },
+          timestamp: Date.now()
+        };
+        ws.send(JSON.stringify(msg));
+      });
+
+      ws.on('message', (data) => {
+        const resp = JSON.parse(data.toString());
+        if (resp.type === 'error' && resp.payload?.code === 'invalid_signature') {
+          ws.close();
+          resolve();
+        } else {
+          ws.close();
+          reject(new Error('Expected invalid_signature error, got: ' + JSON.stringify(resp)));
+        }
+      });
+
+      ws.on('error', reject);
+    });
+  });
+
+  it('Encryption verification: relay never sees plaintext prompt', async () => {
+    // We send a unique prompt, wait for it to finish, and check the DB string.
+    const uniquePrompt = "SUPER_SECRET_E2E_PROMPT_" + Date.now();
+    const res = await fetch(`http://127.0.0.1:${gatewayPort}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        messages: [{ role: 'user', content: uniquePrompt }],
+      }),
+    });
+    expect(res.status).toBe(200);
+
+    // Give relay a moment to write to DB
+    await new Promise(r => setTimeout(r, 100));
+
+    // Verify DB file does NOT contain the unique prompt
+    const dbContent = readFileSync(join(tempDir, 'e2e-relay.db'));
+    expect(dbContent.toString().includes(uniquePrompt)).toBe(false);
   });
 
   it('provider offline: Consumer gets 503', async () => {
     // Create a fresh gateway pointing to relay with no providers
-    const freshRelayPort = 18400 + Math.floor(Math.random() * 100);
     const freshRelayWallet = makeWallet();
     const freshRelay = await startRelay({
-      port: freshRelayPort,
+      port: 0,
       wallet: freshRelayWallet,
       dbPath: join(tempDir, 'e2e-fresh-relay.db'),
     });
+    const freshRelayPort = (freshRelay as any).port;
 
     const consumerWallet = makeWallet();
-    const freshGatewayPort = 18300 + Math.floor(Math.random() * 100);
     const freshGateway = await startGateway({
-      port: freshGatewayPort,
+      port: 0,
       wallet: consumerWallet,
-      relayUrl: `ws://localhost:${freshRelayPort}`,
+      relayUrl: `ws://127.0.0.1:${freshRelayPort}`,
     });
+    const freshGatewayPort = freshGateway.port;
 
     await new Promise((r) => setTimeout(r, 500));
 
-    const res = await fetch(`http://localhost:${freshGatewayPort}/v1/chat/completions`, {
+    const res = await fetch(`http://127.0.0.1:${freshGatewayPort}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
