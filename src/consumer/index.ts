@@ -596,6 +596,6 @@ export async function startGateway(options: GatewayOptions): Promise<{
       server.close();
       relayConn?.close();
     },
-    port,
+    get port() { return (server as any).address().port; },
   };
 }

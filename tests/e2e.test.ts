@@ -12,6 +12,7 @@ import {
   generateEncryptionKeyPair,
 } from '../src/crypto/index.js';
 import type { Wallet } from '../src/wallet/index.js';
+import WebSocket from 'ws';
 
 describe('e2e', () => {
   let tempDir: string;
@@ -70,31 +71,31 @@ describe('e2e', () => {
       });
     });
 
-    mockAnthropicPort = 18700 + Math.floor(Math.random() * 100);
-    mockAnthropicServer = serve({ fetch: anthropicApp.fetch, port: mockAnthropicPort });
+    mockAnthropicServer = serve({ fetch: anthropicApp.fetch, port: 0 });
+    mockAnthropicPort = (mockAnthropicServer as any).address().port;
 
     // 2. Start Relay
-    relayPort = 18600 + Math.floor(Math.random() * 100);
     const relayWallet = makeWallet();
     relayHandle = await startRelay({
-      port: relayPort,
+      port: 0,
       wallet: relayWallet,
       dbPath: join(tempDir, 'e2e-relay.db'),
     });
+    relayPort = relayHandle.port;
 
     // 3. Start Provider (connects to Relay, uses mock Anthropic)
     const providerWallet = makeWallet();
 
-    // We need to patch ANTHROPIC_API_KEY and base URL for the provider
-    // Since handleRequest takes apiBase param, we need to inject it.
-    // For e2e, we'll set env variable approach.
+    // We use proxyUrl instead of MOCK_ANTHROPIC_PORT to tell the provider to hit our mock.
     process.env['MOCK_ANTHROPIC_PORT'] = String(mockAnthropicPort);
 
     providerHandle = await startProvider({
       wallet: providerWallet,
-      relayUrl: `ws://localhost:${relayPort}`,
+      relayUrl: `ws://127.0.0.1:${relayPort}`,
+      proxyUrl: `http://127.0.0.1:${mockAnthropicPort}`,
       apiKeys: [{ provider: 'anthropic', key: 'test-key' }],
       maxConcurrent: 5,
+      healthPort: 0,
     });
 
     // Wait for provider registration
@@ -102,12 +103,12 @@ describe('e2e', () => {
 
     // 4. Start Consumer Gateway (connects to Relay)
     const consumerWallet = makeWallet();
-    gatewayPort = 18500 + Math.floor(Math.random() * 100);
     gatewayHandle = await startGateway({
-      port: gatewayPort,
+      port: 0,
       wallet: consumerWallet,
-      relayUrl: `ws://localhost:${relayPort}`,
+      relayUrl: `ws://127.0.0.1:${relayPort}`,
     });
+    gatewayPort = gatewayHandle.port;
 
     // Wait for consumer to get provider list
     await new Promise((r) => setTimeout(r, 500));
@@ -188,25 +189,25 @@ describe('e2e', () => {
 
   it('provider offline: Consumer gets 503', async () => {
     // Create a fresh gateway pointing to relay with no providers
-    const freshRelayPort = 18400 + Math.floor(Math.random() * 100);
     const freshRelayWallet = makeWallet();
     const freshRelay = await startRelay({
-      port: freshRelayPort,
+      port: 0,
       wallet: freshRelayWallet,
       dbPath: join(tempDir, 'e2e-fresh-relay.db'),
     });
+    const freshRelayPort = freshRelay.port;
 
     const consumerWallet = makeWallet();
-    const freshGatewayPort = 18300 + Math.floor(Math.random() * 100);
     const freshGateway = await startGateway({
-      port: freshGatewayPort,
+      port: 0,
       wallet: consumerWallet,
-      relayUrl: `ws://localhost:${freshRelayPort}`,
+      relayUrl: `ws://127.0.0.1:${freshRelayPort}`,
     });
+    const freshGatewayPort = freshGateway.port;
 
     await new Promise((r) => setTimeout(r, 500));
 
-    const res = await fetch(`http://localhost:${freshGatewayPort}/v1/chat/completions`, {
+    const res = await fetch(`http://127.0.0.1:${freshGatewayPort}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -221,5 +222,63 @@ describe('e2e', () => {
 
     await freshGateway.close();
     await freshRelay.close();
+  });
+
+  it('Auth failure: bad signing key rejected by relay', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${relayPort}`);
+    await new Promise((resolve) => ws.once('open', resolve));
+
+    const badWallet = makeWallet();
+    const helloPayload = {
+      provider_pubkey: Buffer.from(badWallet.signingPublicKey).toString('hex'),
+      encryption_pubkey: Buffer.from(badWallet.encryptionPublicKey).toString('hex'),
+      models: [],
+      capacity: 10,
+    };
+    
+    const ts = Date.now();
+    ws.send(JSON.stringify({
+      type: 'provider_hello',
+      payload: { ...helloPayload, signature: '0'.repeat(128) },
+      timestamp: ts,
+    }));
+
+    const response = await new Promise<any>((resolve) => {
+      ws.once('message', (data) => resolve(JSON.parse(data.toString())));
+    });
+
+    expect(response.type).toBe('provider_ack');
+    expect(response.payload.status).toBe('rejected');
+    expect(response.payload.reason).toBe('invalid_signature');
+    ws.close();
+  });
+
+  it('Encryption verification: relay never sees plaintext prompt', async () => {
+    const originalSend = WebSocket.prototype.send;
+    let interceptedRequest = '';
+
+    WebSocket.prototype.send = function (this: any, data: any) {
+      if (typeof data === 'string' && data.includes('"type":"request"')) {
+        interceptedRequest = data;
+      }
+      return originalSend.apply(this, arguments as any);
+    };
+
+    await fetch(`http://127.0.0.1:${gatewayPort}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        messages: [{ role: 'user', content: 'this is my secret prompt' }],
+      }),
+    });
+
+    WebSocket.prototype.send = originalSend;
+
+    expect(interceptedRequest).not.toBe('');
+    expect(interceptedRequest).not.toContain('this is my secret prompt');
+    
+    const parsed = JSON.parse(interceptedRequest);
+    expect(typeof parsed.payload.inner).toBe('string');
   });
 });

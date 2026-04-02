@@ -121,7 +121,7 @@ export function createWitness(
   };
 }
 
-export async function startRelay(options: RelayOptions): Promise<{ close(): Promise<void> }> {
+export async function startRelay(options: RelayOptions): Promise<{ close(): Promise<void>; witnessStore: WitnessStore; port: number }> {
   const { port, wallet, dbPath, bootstrapUrl } = options;
   let heartbeatInterval: NodeJS.Timeout | null = null;
   const db = initDatabase(dbPath);
@@ -486,5 +486,6 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
       witnessStore.close();
     },
     witnessStore,
+    port: server.port,
   };
 }
