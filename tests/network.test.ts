@@ -31,7 +31,7 @@ describe('network', () => {
     });
     connections.push(conn);
 
-    expect(conn.readyState).toBe('open');
+    expect(conn.readyState).toBe('connected');
   });
 
   it('send + onMessage roundtrip', async () => {
@@ -92,7 +92,7 @@ describe('network', () => {
       pingIntervalMs: 60000,
     });
 
-    expect(conn.readyState).toBe('open');
+    expect(conn.readyState).toBe('connected');
     expect(connCount).toBe(1);
 
     // Terminate the client WS to trigger reconnect cycle

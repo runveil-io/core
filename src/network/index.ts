@@ -12,11 +12,13 @@ import {
   MAX_MESSAGE_SIZE,
 } from '../config/bootstrap.js';
 
+export type ConnectionState = 'connecting' | 'connected' | 'disconnecting' | 'disconnected' | 'reconnecting' | 'failed';
+
 export interface Connection {
   ws: WebSocket;
   send(msg: WsMessage): void;
   close(): void;
-  readonly readyState: 'connecting' | 'open' | 'closing' | 'closed';
+  readonly readyState: ConnectionState;
 }
 
 export interface ConnectionOptions {
@@ -26,13 +28,16 @@ export interface ConnectionOptions {
   onError: (err: Error) => void;
   reconnect?: boolean;
   pingIntervalMs?: number;
+  maxReconnectAttempts?: number;
+  onStateChange?: (state: ConnectionState) => void;
+  onFailed?: () => void;
 }
 
-const WS_STATE_MAP: Record<number, Connection['readyState']> = {
+const WS_STATE_MAP: Record<number, ConnectionState> = {
   [WebSocket.CONNECTING]: 'connecting',
-  [WebSocket.OPEN]: 'open',
-  [WebSocket.CLOSING]: 'closing',
-  [WebSocket.CLOSED]: 'closed',
+  [WebSocket.OPEN]: 'connected',
+  [WebSocket.CLOSING]: 'disconnecting',
+  [WebSocket.CLOSED]: 'disconnected',
 };
 
 function wrapConnection(ws: WebSocket): Connection {
@@ -46,19 +51,38 @@ function wrapConnection(ws: WebSocket): Connection {
     close(): void {
       ws.close();
     },
-    get readyState(): Connection['readyState'] {
-      return WS_STATE_MAP[ws.readyState] ?? 'closed';
+    get readyState(): ConnectionState {
+      return WS_STATE_MAP[ws.readyState] ?? 'disconnected';
     },
   };
 }
 
 export function connect(options: ConnectionOptions): Promise<Connection> {
-  const { url, onMessage, onClose, onError, reconnect = true, pingIntervalMs = PING_INTERVAL_MS } = options;
+  const {
+    url,
+    onMessage,
+    onClose,
+    onError,
+    reconnect = true,
+    pingIntervalMs = PING_INTERVAL_MS,
+    maxReconnectAttempts = 10,
+    onStateChange,
+    onFailed,
+  } = options;
   let pingInterval: ReturnType<typeof setInterval> | null = null;
   let pongTimeout: ReturnType<typeof setTimeout> | null = null;
+  let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempt = 0;
   let intentionallyClosed = false;
   let isFirstConnect = true;
+
+  let currentState: ConnectionState = 'disconnected';
+  function setState(state: ConnectionState) {
+    if (currentState !== state) {
+      currentState = state;
+      onStateChange?.(state);
+    }
+  }
 
   // Shared connection object — ws is swapped on reconnect
   const conn: Connection = {
@@ -71,16 +95,18 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
     close(): void {
       intentionallyClosed = true;
       cleanup();
+      setState('disconnecting');
       this.ws?.close();
     },
-    get readyState(): Connection['readyState'] {
-      return WS_STATE_MAP[this.ws?.readyState ?? WebSocket.CLOSED] ?? 'closed';
+    get readyState(): ConnectionState {
+      return currentState;
     },
   };
 
   function cleanup(): void {
     if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
     if (pongTimeout) { clearTimeout(pongTimeout); pongTimeout = null; }
+    if (reconnectTimeout) { clearTimeout(reconnectTimeout); reconnectTimeout = null; }
   }
 
   function setupPing(ws: WebSocket): void {
@@ -102,11 +128,13 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
 
   function doConnect(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
+      setState(reconnectAttempt === 0 ? 'connecting' : 'reconnecting');
       const ws = new WebSocket(url, { maxPayload: MAX_MESSAGE_SIZE });
       conn.ws = ws;
 
       ws.on('open', () => {
         reconnectAttempt = 0;
+        setState('connected');
         setupPing(ws);
         resolve();
       });
@@ -123,21 +151,37 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
       ws.on('close', (code, reason) => {
         cleanup();
         onClose(code, reason.toString());
-        if (reconnect && !intentionallyClosed) {
+        
+        if (intentionallyClosed) {
+          setState('disconnected');
+          return;
+        }
+
+        if (reconnect) {
+          if (reconnectAttempt >= maxReconnectAttempts) {
+             setState('failed');
+             onFailed?.();
+             return;
+          }
+          setState('reconnecting');
           const delay = Math.min(
             WS_RECONNECT_BASE_MS * Math.pow(2, reconnectAttempt),
             WS_RECONNECT_MAX_MS,
           );
+          const jitter = Math.random() * 1000;
           reconnectAttempt++;
-          setTimeout(() => {
-            doConnect().catch(() => { /* reconnect failures handled by onClose */ });
-          }, delay);
+          if (reconnectTimeout) clearTimeout(reconnectTimeout);
+          reconnectTimeout = setTimeout(() => {
+            doConnect().catch(() => { /* handled by onClose/error */ });
+          }, delay + jitter);
+        } else {
+          setState('disconnected');
         }
       });
 
       ws.on('error', (err) => {
         onError(err);
-        if (isFirstConnect && ws.readyState !== WebSocket.OPEN) {
+        if (ws.readyState !== WebSocket.OPEN) {
           reject(err);
         }
       });

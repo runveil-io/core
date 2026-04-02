@@ -12,7 +12,7 @@ export const PING_INTERVAL_MS = 30_000;
 export const PONG_TIMEOUT_MS = 10_000;
 export const MAX_MESSAGE_SIZE = 10 * 1024 * 1024; // 10 MB
 export const WS_RECONNECT_BASE_MS = 1000;
-export const WS_RECONNECT_MAX_MS = 60_000;
+export const WS_RECONNECT_MAX_MS = 30_000;
 
 export const RETRY_CONFIG = {
   maxRetries: 3,
