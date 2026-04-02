@@ -59,7 +59,17 @@ app.all('/v1/*', async (c) => {
     : undefined;
 
   try {
-    const res = await fetch(upstreamUrl, { method, headers, body });
+    const timeoutMs = parseInt(process.env.PROVIDER_TIMEOUT_MS || '60000', 10);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    const res = await fetch(upstreamUrl, { 
+      method, 
+      headers, 
+      body, 
+      signal: controller.signal 
+    });
+    clearTimeout(timeoutId);
 
     // Stream response back (important for SSE streaming)
     const responseHeaders = new Headers();
@@ -74,6 +84,10 @@ app.all('/v1/*', async (c) => {
 
     return c.json(await res.json(), res.status as any);
   } catch (err: any) {
+    if (err.name === 'AbortError') {
+      log.error('upstream_timeout', { error: 'Request to upstream timed out' });
+      return c.json({ error: { message: 'Upstream API request timed out', type: 'timeout_error' } }, 504);
+    }
     log.error('upstream_error', { error: err.message });
     return c.json({ error: { message: 'Upstream API unreachable', type: 'api_error' } }, 502);
   }

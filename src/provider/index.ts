@@ -114,16 +114,27 @@ export async function handleRequest(
       await new Promise((r) => setTimeout(r, getRetryDelay(attempt - 1)));
     }
 
+    const timeoutMs = parseInt(process.env.PROVIDER_TIMEOUT_MS || '60000', 10);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
     let res: Response;
     try {
       res = await fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(anthropicRequest),
+        signal: controller.signal,
       });
     } catch (err) {
-      lastError = err as Error;
+      if ((err as Error).name === 'AbortError') {
+        lastError = new Error(`provider_timeout_${timeoutMs}ms`);
+      } else {
+        lastError = err as Error;
+      }
       continue;
+    } finally {
+      clearTimeout(timeoutId);
     }
 
     log.debug('anthropic_status', { status: res.status });
