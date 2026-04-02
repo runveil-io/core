@@ -1,6 +1,6 @@
-# Contributing to Veil Protocol
+# Contributing to Veil
 
-You write code. If it passes tests and gets merged, you earn future revenue share. That's the deal.
+You write code. If it passes tests, survives review, and gets merged, it earns auditable contribution credit under RBOB.
 
 ## 5-Minute Setup
 
@@ -11,29 +11,24 @@ npm install
 npm test
 ```
 
-You should see `36/36 tests passing`. If you don't, you found your first contribution.
+You should see all tests passing. If you don't, you found your first contribution.
 
 **Requirements**: Node.js 22+, npm
 
-## How You Get Paid (RBOB)
+## How Contribution Accounting Works (RBOB)
 
 Veil uses the **Rule-Based Open Build** protocol. Four rules:
 
 1. **R1** — Code must pass all tests in CI
 2. **R2** — Merge requires K independent approvals (currently K=1, Kousan)
 3. **R3** — Protected modules (`crypto/`, `wallet/`) require higher threshold
-4. **R4** — Surviving code earns points. Points = future revenue share.
+4. **R4** — Surviving code earns points in the contribution ledger.
 
 **What "surviving" means**: your code stays in the codebase and passes tests. Dead code gets pruned, and points go with it.
 
-**Genesis Bonus**: Early contributors earn 5x points. This compensates for the risk of building before there's revenue. The bonus decreases as the protocol matures.
+**Genesis Bonus**: Early contributors earn 5x points. This reflects early-stage build risk and the fact that core system boundaries are still being established.
 
-**The economic loop**:
-```
-Your code → earns points → TGE → points convert to TOKEN → protocol revenue flows to TOKEN holders
-```
-
-Points are tracked in `contributions.db` with full git audit trail. No USDC payouts pre-TGE — points are your equity in the protocol's future.
+Points are tracked in the RBOB ledger with a git-auditable contribution trail. Future governance or reward systems should consume the same auditable record, but they are not part of the current runtime contract.
 
 ## Finding Work
 
@@ -46,7 +41,7 @@ npm test -- --reporter=verbose 2>&1 | grep FAIL
 A failing test is a bounty. Fix it, PR it, earn points.
 
 ### 2. Read the code
-The codebase is ~1500 lines. You can read all of `src/` in 30 minutes. If you spot something missing or broken, that's your contribution. Check `docs/design/00-architecture-review-v0.2.md` for the planned module structure — gaps between the doc and the code are real tasks.
+The codebase is compact enough to inspect directly. If you spot something missing or broken, that's a contribution candidate. Start with [docs/README.md](docs/README.md), then [docs/technical-design/architecture/README.md](docs/technical-design/architecture/README.md) and [docs/technical-design/modules/README.md](docs/technical-design/modules/README.md) to compare the intended boundaries against the current implementation.
 
 ### 3. GitHub Issues
 Look for labels:
@@ -57,17 +52,16 @@ Look for labels:
 ### 4. Desired states
 Check `desired/` directory (when populated) for feature specs with acceptance criteria and bounty values.
 
-### 5. Let your agent do it
-```bash
-clawd build
-```
-This scans the repo for failing tests, TODOs, and desired states, picks one, writes code, runs tests, and opens a PR. You review and submit. Or set it to `auto`.
+### 5. Use your preferred coding agent
+
+If you work with an agent, point it at `desired/*.yaml`, failing tests, and inline TODOs. The repo already exposes the task sources; the agent does not need a separate control plane.
 
 ## Submitting a PR
 
 Keep it simple:
 
 1. **Fork & branch**: `git checkout -b fix/relay-timeout`
+   AI agents following [AGENTS.md](AGENTS.md) should use `agent/{task-id}` instead.
 2. **Write code + tests**: if you touch `src/`, touch `tests/`
 3. **Run tests locally**: `npm test` — all green
 4. **Open PR** with:
@@ -90,8 +84,9 @@ These modules are under R3 protection (higher review threshold):
 
 - `src/crypto/` — envelope encryption, key generation
 - `src/wallet/` — encrypted storage, KDF
-- `RULES.md` — the rules themselves
-- `contributions.db` — the points ledger
+- `src/relay/index.ts` — core identity verification and routing logic
+- `package.json` — dependency surface
+- `tsconfig.json` — compiler behavior
 
 Open an issue first if you want to modify these. They affect security and economics.
 
@@ -122,8 +117,8 @@ Consumer (localhost:9960)
     → encrypts prompt with Provider's public key
     → sends to Relay over WebSocket
     
-Relay (wss://relay.runveil.io)
-    → verifies auth, strips identity
+Relay (configured or discovered endpoint)
+    → verifies auth, applies routing policy
     → forwards encrypted blob to Provider
     
 Provider (your machine)
@@ -132,14 +127,14 @@ Provider (your machine)
     → encrypts response, sends back
 ```
 
-Relay sees **who** but not **what**. Provider sees **what** but not **who**.
+Relay sees routing and witness metadata but not prompt plaintext. Provider sees plaintext execution payload, but it should not receive unnecessary Consumer-side local context.
 
 ## Questions?
 
 - [Telegram](https://t.me/+XJ-ogZ9hBy44ZmFl) — fastest response
 - GitHub Issues — for anything technical
-- `clawd build` — if you'd rather let your agent ask for you
+- use your preferred coding agent if you want help scanning `desired/*.yaml`, failing tests, and TODOs
 
 ---
 
-*Your code survives → you earn. That's the only rule that matters.*
+*Your code survives review and stays useful → it earns auditable contribution credit.*

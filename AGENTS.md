@@ -51,17 +51,17 @@ src/
   cli.ts              — CLI entry point
   db.ts               — SQLite database
   types.ts            — Shared type definitions
-  logger.ts           — (desired) Structured logging
+  logger.ts           — Structured logging
   config/
     bootstrap.ts      — Bootstrap and config loading
-    validator.ts      — (desired) Config validation
+    validator.ts      — Config validation
   consumer/
     index.ts          — Consumer client
     anthropic-stream.ts — Anthropic SSE streaming
     selector.ts       — (desired) Provider selection
   provider/
     index.ts          — Provider HTTP server
-    metrics.ts        — (desired) Performance metrics
+    metrics.ts        — Performance metrics
   relay/
     index.ts          — Relay server
   proxy/

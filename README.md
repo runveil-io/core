@@ -1,237 +1,179 @@
-# Veil Protocol
+# Veil
 
-**Decentralized AI inference. No account. No identity. Just AI.**
+Veil is an open-source AI capacity marketplace being built in stages. Today it runs as an AI inference routing runtime for accountless, OpenAI-compatible access to Provider-supplied capacity, with Relay-based routing and signed witness recording.
 
-```
-$ veil init
-$ veil provide start    # Share idle AI capacity, earn USDC
-$ veil credits add 10   # Access top AI models, pay with crypto
-$ clawd build           # Contribute code, earn future revenue
-```
+## Overview
 
-[Website](https://runveil.io) · [Whitepaper](https://runveil.io/whitepaper) · [Twitter](https://x.com/runveil_io) · [Telegram](https://t.me/+XJ-ogZ9hBy44ZmFl) · [GitHub](https://github.com/runveil-io)
+Veil lets existing OpenAI-compatible clients call a local gateway while routing execution through Relay and Provider nodes. The runtime is the delivery layer for a larger product goal: Consumers get accountless access to AI capacity, Providers expose spare capacity as routable supply, Relays broker traffic without becoming the execution endpoint, and Claw becomes the low-touch automation surface for joining and operating the network.
 
----
+## Design Goals
 
-## Why Veil?
+- keep existing OpenAI-compatible clients working
+- make AI access possible without wiring every tool directly to every upstream account
+- turn spare Provider-side capacity into reusable network supply
+- route around single-account or single-provider bottlenecks
+- separate routing visibility from execution visibility
+- preserve witness and accounting boundaries for later reconciliation
+- keep crypto-compatible settlement on the main roadmap without making the runtime chain-first
 
-**Your API quota ran out mid-task?** Switch to Veil. Use someone else's idle capacity. Keep working.
+## Runtime Roles
 
-```
-Direct:  Your App → Your API Key → Anthropic (quota exceeded ❌)
-Veil:    Your App → localhost:4000 → Relay → Provider's API → Anthropic ✅
-```
+- `Consumer`: local gateway and request origin
+- `Relay`: verification, routing, limits, and witness
+- `Provider`: upstream execution and streaming response delivery
+- `Bootstrap`: Relay discovery service
 
-Veil runs as a local gateway on port 4000. Your tools (Cursor, OpenClaw, any OpenAI-compatible client) don't know the difference. You pay per token with crypto — cheaper than buying another subscription.
+The target marketplace runtime adds `Claw` as the operator automation surface for join, sell, pause, and recovery workflows.
 
-**Your subscription is idle 90% of the time?** Share it. Earn USDC while you sleep.
+## Supporting Systems
 
-**You need AI but don't want an account?** Veil is anonymous. No KYC. No tracking. The relay sees who sent a request but can't read it. The provider processes the request but doesn't know who sent it.
+- `RBOB`: open-source contribution accounting
 
----
+## Request Path
 
-## What is Veil?
-
-Veil is a decentralized network for AI inference. Three roles:
-
-- **Providers** share idle AI subscription capacity and earn USDC
-- **Consumers** access top AI models anonymously with crypto
-- **Relays** route encrypted traffic and earn TOKEN
-
-No KYC. No tracking. End-to-end encrypted. Settlement on Solana.
-
-```
-Consumer ──> Relay ──> Provider ──> AI Model
-    |           |          |
-    └────── SOLANA CHAIN ──┘
+```text
+Client -> Consumer Gateway -> Relay -> Provider -> Upstream AI
+                     \-> Budget      \-> Witness
+Bootstrap -> Relay discovery
+RBOB -> contribution accounting
 ```
 
-The Relay sees **who** but not **what**. The Provider sees **what** but not **who**.
+## What You Get
+
+- exposes a local gateway for existing AI clients
+- allows callers to consume AI access through Veil instead of binding every client directly to an upstream account
+- routes encrypted requests through Relay nodes
+- lets Providers contribute routable AI capacity
+- executes requests on Provider nodes
+- records witness data for stats, export, and later reconciliation
+- keeps contribution accounting separate from production inference traffic
+
+## Product Model
+
+- `Consumer`: wants reliable AI access through one local interface, without forcing every tool to manage every upstream account directly
+- `Provider`: contributes spare AI quota or API capacity and serves inference inside the execution boundary
+- `Relay`: brokers routing, admission, and witness without becoming the model execution host
+- `Claw`: becomes the supported automation layer for onboarding, policy application, and sell-side operation
+- `Contributors`: improve the protocol and runtime through the open-source build loop
+
+## Current Status
+
+- implemented today: local Consumer gateway, Relay routing, Provider execution, witness export, wallet management, Relay discovery, and RBOB contribution accounting
+- planned next: quote-aware pricing interfaces, settlement evidence contracts, payment-rail adapters, and Provider or Relay payout surfaces
+- long-term target: Claw-managed network join, low-touch Provider operation, policy-driven selling, and witness-backed, crypto-compatible settlement
 
 ## Quick Start
-
-### Use AI (Consumer)
-
-```bash
-npm install -g veil
-veil init
-# Point Cursor/Windsurf at http://localhost:9960/v1
-```
-
-### Share AI Capacity (Provider)
-
-```bash
-veil provide init     # Configure your AI subscription
-veil provide start    # Start earning
-```
-
-### Run a Relay
-
-```bash
-veil relay start      # Route traffic, earn TOKEN
-```
-
-## Architecture
-
-```
-+------------------+     +------------------+     +------------------+
-|    CONSUMER      |     |      RELAY       |     |    PROVIDER      |
-|                  |     |                  |     |                  |
-| localhost:9960   |---->| Auth + Strip ID  |---->| Decrypt + Infer  |
-| OpenAI-compat    |<----| Witness + Route  |<----| Encrypt + Return |
-|                  |     |                  |     |                  |
-| Encrypt prompt   |     | Can't read       |     | Can't see who    |
-| with Provider    |     | prompt content   |     | sent the request |
-| public key       |     |                  |     |                  |
-+------------------+     +------------------+     +------------------+
-                                  |
-                          +-------+-------+
-                          | SOLANA CHAIN  |
-                          | Registry      |
-                          | Escrow        |
-                          | Settlement    |
-                          +---------------+
-```
-
-## Build Protocol (RBOB)
-
-Veil builds itself. Four rules. Everything else emerges.
-
-```
-R1: Code that passes verification can be merged.
-R2: Merge requires K independent stake signatures.
-R3: Protected modules require higher threshold.
-R4: Surviving code earns future revenue share.
-```
-
-Satoshi didn't design mining pools. He wrote rules. An industry emerged.
-
-Linux wasn't planned. Wikipedia wasn't designed. Bitcoin wasn't managed.
-
-They were given rules. The rest emerged.
-
-```bash
-$ clawd build         # Your agent scans the repo, finds work, submits PRs
-```
-
-## Revenue Model
-
-```
-Inference earns USDC ──> Treasury (10%) ──> Build rewards
-        ^                                       |
-        └──── Better protocol <──── Your contribution
-```
-
-- Provider: 80% of transaction value
-- Relay: 10%
-- Treasury: 10% (funds development + buybacks)
-
-## Tech Stack
-
-- **Runtime**: Node.js 22+ / TypeScript
-- **Crypto**: tweetnacl (X25519 + Ed25519)
-- **Transport**: WebSocket (QUIC in Stage 2)
-- **Chain**: Solana (Stage 2)
-- **Tests**: vitest (36/36 passing)
-
-## Project Structure
-
-```
-veil-core/
-  src/
-    consumer/     OpenAI-compatible local gateway
-    provider/     Decrypt + API call + encrypt response
-    relay/        Auth forwarding + witness recording
-    crypto/       Envelope encryption (tweetnacl)
-    wallet/       Encrypted keypair storage (scrypt+AES)
-    network/      WebSocket with auto-reconnect
-    cli.ts        veil init / provide / relay / status
-    db.ts         SQLite schema
-    types.ts      Wire protocol + API types
-  tests/          36 test cases
-```
-
-## Security
-
-- **Envelope encryption**: Relay can't read prompt content
-- **Dual keypairs**: Separate Ed25519 (signing) + X25519 (encryption)
-- **Wallet encryption**: scrypt + AES-256-GCM
-- **No code execution**: Provider only forwards HTTP, never executes prompts
-- **Relay TOFU**: Official relay pubkey hardcoded
-
-See [Security Threat Model](docs/design/02-security-threat-model.md) for full analysis.
-
-## Status
-
-**Testnet** — Day 1 verified end-to-end:
-
-- [x] Consumer → Relay → Provider → Anthropic → response
-- [x] Streaming (SSE, OpenAI-compatible)
-- [x] Envelope encryption (Relay can't read prompts)
-- [x] Multi-turn conversation
-- [x] Error handling (OpenAI-compatible error format)
-- [x] 36/36 unit tests passing
-- [ ] Multi-provider support
-- [ ] On-chain settlement
-- [ ] TOKEN economics
-- [ ] RBOB build system
-
-## Want to Build?
-
-Veil pays contributors with points, not promises.
-
-**How it works**: Your merged code earns RBOB points. Points are tracked with full git audit trail and convert to TOKEN at TGE. Code that survives in the codebase keeps earning. Code that gets removed stops earning. Simple.
-
-Early contributors get a **5x Genesis Bonus** — compensating for the risk of building before there's a token.
-
-```
-Your code passes tests → gets merged → earns points → TGE → points convert to TOKEN
-```
-
-### Get Started in 5 Minutes
 
 ```bash
 git clone https://github.com/runveil-io/core.git
 cd core
 npm install
-npm test    # 36/36 passing
+npm test
 ```
 
-### Find Work
-
-- **[Good First Issues](good-first-issues.md)** — 10 scoped tasks with clear acceptance criteria
-- `grep -rn "TODO\|FIXME" src/` — every TODO is a contribution opportunity
-- Failing tests — if any test is red, fixing it earns points
-
-### Or Let Your Agent Do It
+Initialize a local wallet:
 
 ```bash
-clawd build    # Scans repo, picks a task, writes code, opens PR
+veil init
 ```
 
-### Read More
-
-- [CONTRIBUTING.md](CONTRIBUTING.md) — setup, PR process, RBOB details
-- [RBOB Protocol](docs/specs/rbob-protocol-v1.md) — the full rule spec
-
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute.
+Run a Provider:
 
 ```bash
-$ clawd build    # Let your agent find work and submit PRs
+veil provide init
+veil provide start
 ```
 
-Or manually: fork → branch → code → test → PR.
+Run a Relay:
 
-## License
+```bash
+veil relay start
+```
 
-MIT
+Use the local gateway:
 
----
+```bash
+# OpenAI-compatible endpoint
+http://localhost:9960/v1
+```
 
-**[runveil.io](https://runveil.io)** · [@runveil_io](https://x.com/runveil_io) · [Telegram](https://t.me/+XJ-ogZ9hBy44ZmFl)
+## Documentation
+
+- Docs home: [docs/README.md](docs/README.md)
+- 中文入口: [docs/README.zh.md](docs/README.zh.md)
+- Design governance: [docs/design-governance/README.md](docs/design-governance/README.md)
+- Product design: [docs/product-design/README.md](docs/product-design/README.md)
+- Trust and privacy: [docs/product-design/trust-and-privacy/README.md](docs/product-design/trust-and-privacy/README.md)
+- Install and run: [docs/installation/README.md](docs/installation/README.md)
+- Daily operations: [docs/manual/README.md](docs/manual/README.md)
+- Configuration: [docs/technical-design/configuration/README.md](docs/technical-design/configuration/README.md)
+- Client integration: [docs/clients/README.md](docs/clients/README.md)
+- Architecture: [docs/technical-design/architecture/README.md](docs/technical-design/architecture/README.md)
+- Module specs: [docs/technical-design/modules/README.md](docs/technical-design/modules/README.md)
+
+For protocol behavior, operations, and implementation boundaries, continue from [docs/README.md](docs/README.md).
+
+## Repository Layout
+
+```text
+src/
+  bootstrap/     Relay registry service
+  config/        bootstrap and validation
+  consumer/      local gateway and budget guard
+  crypto/        signing and sealed payload handling
+  discovery/     Relay discovery client
+  metering/      usage normalization and pricing
+  network/       WebSocket transport
+  provider/      upstream execution engine
+  proxy/         local secret-holding upstream proxy
+  rbob/          contribution ledger
+  relay/         routing, rate limit, witness
+  wallet/        encrypted wallet and secrets
+  cli.ts         command entry
+tests/           unit and integration tests
+docs/            project documentation
+```
+
+## Runtime Defaults
+
+- default gateway port: `9960`
+- default Relay port: `8080`
+- default Provider health port: `9962`
+- default proxy port: `4000`
+- transport: WebSocket
+- runtime: Node.js 22 + TypeScript
+
+## Security Boundaries
+
+- Relay forwards sealed request payloads without decrypting them
+- Provider decrypts only inside the execution boundary
+- signing keys and encryption keys are separate
+- wallet files and Provider credentials are encrypted at rest
+- Veil is privacy-preserving by design, but it does not claim perfect anonymity against traffic analysis, endpoint compromise, or colluding operators
+
+## Development
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) and `desired/*.yaml` before starting work.
+
+Useful commands:
+
+```bash
+npm test
+npx vitest run --reporter=verbose
+grep -rn "TODO\\|FIXME" src/
+```
+
+## Community
+
+Veil is an open-source project built in public. That only works if maintainers, reviewers, and contributors are visible parts of the project surface.
+
+- Website: [runveil.io](https://runveil.io)
+- GitHub: [runveil-io](https://github.com/runveil-io)
+- X: [@runveil_io](https://x.com/runveil_io)
+- Telegram: [community chat](https://t.me/+XJ-ogZ9hBy44ZmFl)
+- start with [CONTRIBUTING.md](CONTRIBUTING.md)
+- use `desired/*.yaml`, failing tests, and inline TODOs to find work
+- open issues or pull requests when you want to improve a module, document a bug, or propose a change
 
 ## Contributors
 
@@ -241,9 +183,12 @@ Thanks to everyone building Veil.
 |-------------|-----|--------|---------------|
 | [@Chronolapse411](https://github.com/Chronolapse411) | #30, #31, #33 | 7,500 | Rate limiting, Consumer retry, Provider metrics |
 | [@sami-openlife](https://github.com/sami-openlife) | #15, #16 | 4,500 | Config validation, Structured logging |
-| [@597226617](https://github.com/597226617) | #11, #50 | 5,000 | CLI colors & spinner, Metering module |
-| [@grit-web3-agency](https://github.com/grit-web3-agency) | #54 | 2,500 | RBOB Points ledger |
+| [@597226617](https://github.com/597226617) | #11, #50 | 5,000 | CLI colors and spinner, Metering module |
+| [@grit-web3-agency](https://github.com/grit-web3-agency) | #54 | 2,500 | RBOB points ledger |
 | [@hopkdj](https://github.com/hopkdj) | #12 | 1,500 | Provider health endpoint |
 
-*Points include 5x Genesis Bonus (early contributor multiplier).*
-*Points convert to TOKEN at TGE.*
+Points reflect the repository's contribution accounting model, including the early contributor multiplier where applicable.
+
+## License
+
+MIT
