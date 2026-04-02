@@ -12,7 +12,9 @@ export type MessageType =
   | 'ping'
   | 'pong'
   | 'list_providers'
-  | 'provider_list';
+  | 'provider_list'
+  | 'probe'
+  | 'probe_ack';
 
 export interface WsMessage {
   type: MessageType;
@@ -67,6 +69,12 @@ export interface StreamEndPayload {
 export interface ErrorPayload {
   code: string;
   message: string;
+}
+
+export interface ProbePayload {}
+
+export interface ProbeAckPayload {
+  status: 'alive' | 'busy' | 'rate_limited';
 }
 
 export interface ProviderListPayload {
@@ -135,4 +143,14 @@ export interface ProviderInfo {
   encryption_pubkey: string;
   models: string[];
   capacity: number;
+}
+
+export interface ProbePayload {
+  request_id: string;
+  timestamp: number;
+}
+
+export interface ProbeAckPayload {
+  status: 'alive' | 'busy' | 'rate_limited';
+  progress?: string;
 }

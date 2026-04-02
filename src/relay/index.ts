@@ -14,6 +14,7 @@ import type {
   RequestPayload,
   ProviderInfo,
   StreamEndPayload,
+  ProbeAckPayload,
 } from '../types.js';
 import type { Wallet } from '../wallet/index.js';
 import type Database from 'better-sqlite3';
@@ -24,7 +25,13 @@ export interface RelayOptions {
   dbPath: string;
   bootstrapUrl?: string;
   witnessDbPath?: string;
+  probeSilenceMs?: number;
+  probeTimeoutMs?: number;
+  probeIntervalMs?: number;
 }
+
+const DEFAULT_PROBE_SILENCE_MS = 30_000;
+const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 
 interface ConnectedProvider {
   conn: Connection;
@@ -123,11 +130,16 @@ export function createWitness(
 
 export async function startRelay(options: RelayOptions): Promise<{ close(): Promise<void> }> {
   const { port, wallet, dbPath, bootstrapUrl } = options;
+  const probeSilenceMs = options.probeSilenceMs ?? DEFAULT_PROBE_SILENCE_MS;
+  const probeTimeoutMs = options.probeTimeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
+  const probeIntervalMs = options.probeIntervalMs ?? Math.floor(probeSilenceMs / 6);
   let heartbeatInterval: NodeJS.Timeout | null = null;
+  let probeCheckInterval: NodeJS.Timeout | null = null;
   const db = initDatabase(dbPath);
   const providers = new Map<string, ConnectedProvider>();
   const consumers = new Map<string, Connection>(); // request_id -> consumer conn
-  const requestMeta = new Map<string, { consumerPubkey: string; providerId: string; model: string; startTime: number }>();
+  const requestMeta = new Map<string, { consumerPubkey: string; providerId: string; model: string; startTime: number; lastActivity: number }>();
+  const probeState = new Map<string, { failures: number; probeTs: number | null }>();
 
   // Initialize witness store (separate DB)
   const witnessDbPath = options.witnessDbPath ?? dbPath.replace(/\.db$/, '-witness.db');
@@ -251,11 +263,13 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
     // Store mapping for response routing
     consumers.set(requestId, conn);
+    const now = Date.now();
     requestMeta.set(requestId, {
       consumerPubkey: payload.outer.consumer_pubkey,
       providerId: payload.outer.provider_id,
       model: payload.outer.model,
-      startTime: Date.now(),
+      startTime: now,
+      lastActivity: now,
     });
 
     // Forward to provider with consumer_pubkey redacted
@@ -284,6 +298,8 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
   function handleProviderResponse(msg: WsMessage): void {
     const requestId = msg.request_id!;
+    const meta = requestMeta.get(requestId);
+    if (meta) meta.lastActivity = Date.now();
     const consumerConn = consumers.get(requestId);
     if (!consumerConn) return;
 
@@ -346,6 +362,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
       consumers.delete(requestId);
       requestMeta.delete(requestId);
+      probeState.delete(requestId);
     }
   }
 
@@ -357,6 +374,57 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
       timestamp: Date.now(),
     });
   }
+
+  function killDeadProvider(providerId: string): void {
+    for (const [requestId, meta] of requestMeta) {
+      if (meta.providerId !== providerId) continue;
+      const consumerConn = consumers.get(requestId);
+      if (consumerConn) {
+        consumerConn.send({
+          type: 'error',
+          request_id: requestId,
+          payload: { code: 'provider_dead', message: 'Provider stopped responding' },
+          timestamp: Date.now(),
+        });
+        consumers.delete(requestId);
+      }
+      requestMeta.delete(requestId);
+      probeState.delete(requestId);
+    }
+    providers.delete(providerId);
+    try { removeProvider.run(providerId); } catch { /* db may be closed */ }
+    log.warn('provider_dead', { id: providerId.slice(0, 16) });
+  }
+
+  probeCheckInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [requestId, meta] of requestMeta) {
+      let state = probeState.get(requestId);
+      if (!state) {
+        state = { failures: 0, probeTs: null };
+        probeState.set(requestId, state);
+      }
+
+      if (state.probeTs !== null) {
+        if (now - state.probeTs >= probeTimeoutMs) {
+          state.failures++;
+          state.probeTs = null;
+          if (state.failures >= 2) {
+            killDeadProvider(meta.providerId);
+          }
+        }
+        continue;
+      }
+
+      if (now - meta.lastActivity >= probeSilenceMs) {
+        const provider = providers.get(meta.providerId);
+        if (provider && provider.conn.readyState === 'open') {
+          provider.conn.send({ type: 'probe', request_id: requestId, payload: {}, timestamp: now });
+          state.probeTs = now;
+        }
+      }
+    }
+  }, probeIntervalMs);
 
   const server = createServer({
     port,
@@ -391,6 +459,20 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
             case 'list_providers':
               handleListProviders(conn);
               break;
+
+            case 'probe_ack': {
+              const rid = msg.request_id;
+              if (rid) {
+                const state = probeState.get(rid);
+                if (state && state.probeTs !== null) {
+                  const m = requestMeta.get(rid);
+                  if (m) m.lastActivity = Date.now();
+                  state.failures = 0;
+                  state.probeTs = null;
+                }
+              }
+              break;
+            }
 
             case 'ping':
               conn.send({ type: 'pong', payload: {}, timestamp: Date.now() });
@@ -469,6 +551,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
   return {
     async close(): Promise<void> {
       if (heartbeatInterval) clearInterval(heartbeatInterval);
+      if (probeCheckInterval) clearInterval(probeCheckInterval);
 
       // Deregister from bootstrap
       if (bootstrapUrl) {

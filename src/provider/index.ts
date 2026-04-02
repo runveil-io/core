@@ -233,6 +233,16 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
         return;
       }
 
+      if (msg.type === 'probe') {
+        conn.send({
+          type: 'probe_ack',
+          request_id: msg.request_id,
+          payload: { status: activeRequests >= maxConcurrent ? 'busy' : 'alive' },
+          timestamp: Date.now(),
+        });
+        return;
+      }
+
       if (msg.type === 'request') {
         if (activeRequests >= maxConcurrent) {
           conn.send({
