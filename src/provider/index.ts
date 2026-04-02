@@ -441,7 +441,19 @@ export async function startProvider(options: ProviderOptions): Promise<{ close()
 
   return {
     async close(): Promise<void> {
-      healthServer?.close();
+      let waited = 0;
+      while (activeRequests > 0 && waited < 300) {
+        await new Promise((r) => setTimeout(r, 100));
+        waited++;
+      }
+      if (activeRequests > 0) {
+        log.warn('provider_close_timeout', { activeRequests });
+      }
+      if (healthServer) {
+        await new Promise<void>((resolve) => {
+          healthServer!.close(() => resolve());
+        });
+      }
       conn.close();
     },
   };

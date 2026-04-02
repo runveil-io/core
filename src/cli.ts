@@ -24,7 +24,7 @@ function shouldUseColors(): boolean {
 function color(text: string, colorName: string): string {
   if (!shouldUseColors()) return text;
   try {
-    return styleText(colorName, text);
+    return styleText(colorName as Parameters<typeof styleText>[0], text);
   } catch {
     return text;
   }
@@ -209,13 +209,14 @@ async function cmdProvideInit(): Promise<void> {
 
   const password = await promptPassword('Wallet password: ');
   
-  spinner.start('Verifying wallet');
+  const verifySpinner = new Spinner('Verifying wallet');
+  verifySpinner.start();
   // Verify password by loading wallet
   try {
     await loadWallet(password, home);
-    spinner.stop('Wallet verified', true);
+    verifySpinner.stop('Wallet verified', true);
   } catch {
-    spinner.stop('Wrong password', false);
+    verifySpinner.stop('Wrong password', false);
     process.exit(1);
   }
 
@@ -319,17 +320,19 @@ async function cmdProvideStart(): Promise<void> {
   output.write(`  ${colors.bold('Relay:')}      ${colors.info(relayUrl)}\n`);
   output.write(`  ${colors.bold('Status:')}     ${colors.success('Waiting for requests...')}\n`);
 
-  process.on('SIGINT', async () => {
+  let shuttingDown = false;
+  const handleShutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     output.write('\n');
-    output.write(colors.warning('Shutting down provider...\n'));
+    const shutdownSpinner = new Spinner('Shutting down provider');
+    shutdownSpinner.start();
     await provider.close();
-    output.write(colors.success('Provider stopped.\n'));
+    shutdownSpinner.stop('Provider stopped', true);
     process.exit(0);
-  });
-  process.on('SIGTERM', async () => {
-    await provider.close();
-    process.exit(0);
-  });
+  };
+  process.on('SIGINT', handleShutdown);
+  process.on('SIGTERM', handleShutdown);
 }
 
 async function cmdRelayStart(): Promise<void> {
@@ -355,17 +358,19 @@ async function cmdRelayStart(): Promise<void> {
   output.write(`  ${colors.bold('WebSocket:')}  ${colors.info(`ws://0.0.0.0:${port}`)}\n`);
   output.write(`  ${colors.bold('Providers:')}  ${colors.success('0 connected')}\n`);
 
-  process.on('SIGINT', async () => {
+  let shuttingDown = false;
+  const handleShutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     output.write('\n');
-    output.write(colors.warning('Shutting down relay...\n'));
+    const shutdownSpinner = new Spinner('Shutting down relay');
+    shutdownSpinner.start();
     await relay.close();
-    output.write(colors.success('Relay stopped.\n'));
+    shutdownSpinner.stop('Relay stopped', true);
     process.exit(0);
-  });
-  process.on('SIGTERM', async () => {
-    await relay.close();
-    process.exit(0);
-  });
+  };
+  process.on('SIGINT', handleShutdown);
+  process.on('SIGTERM', handleShutdown);
 }
 
 async function cmdStatus(): Promise<void> {

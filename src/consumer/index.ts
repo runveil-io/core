@@ -491,7 +491,29 @@ export async function startGateway(options: GatewayOptions): Promise<{
 
   return {
     async close(): Promise<void> {
-      server.close();
+      let waited = 0;
+      while (pendingRequests.size > 0 && waited < 300) {
+        await sleep(100);
+        waited++;
+      }
+      if (pendingRequests.size > 0) {
+        log.warn('consumer_close_timeout', { pending: pendingRequests.size });
+        for (const [requestId, pending] of pendingRequests.entries()) {
+          if (relayConn && relayConn.readyState === 'open') {
+            relayConn.send({
+              type: 'error',
+              request_id: requestId,
+              payload: { code: 'client_abort', message: 'Consumer shutting down' },
+              timestamp: Date.now(),
+            });
+          }
+          pending.reject(new Error('consumer_shutting_down'));
+        }
+        pendingRequests.clear();
+      }
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
       relayConn?.close();
     },
     port,

@@ -387,7 +387,42 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
   return {
     async close(): Promise<void> {
-      server.close();
+      const shutdownMsg: WsMessage = {
+        type: 'error',
+        payload: { code: 'server_shutdown', message: 'Relay is shutting down' },
+        timestamp: Date.now(),
+      };
+      
+      for (const provider of providers.values()) {
+        try {
+          if (provider.conn.readyState === 'open') {
+            provider.conn.send(shutdownMsg);
+            provider.conn.ws.close(1001, 'Going Away');
+          }
+        } catch {}
+      }
+      
+      for (const conn of consumers.values()) {
+        try {
+          if (conn.readyState === 'open') {
+            conn.send(shutdownMsg);
+            conn.ws.close(1001, 'Going Away');
+          }
+        } catch {}
+      }
+      
+      await new Promise<void>((resolve) => {
+         server.close();
+         // wss.close doesn't take a standard callback in the wrapper, so a short timeout works
+         // But server.close() is sync returning immediately.
+         setTimeout(resolve, 50);
+      });
+      
+      try {
+        db.pragma('wal_checkpoint(TRUNCATE)');
+      } catch (err) {
+        log.warn('db_checkpoint_failed', { error: (err as Error).message });
+      }
       db.close();
     },
   };
