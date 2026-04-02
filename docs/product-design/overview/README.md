@@ -18,7 +18,7 @@ Veil is being built as an open-source AI capacity marketplace. Its current runti
 
 Veil is being built toward an agent-operated AI capacity marketplace. In the target experience, an operator tells Claw to join the network and start selling available inference capacity, and the runtime handles discovery, registration, pricing, routing, witness, and settlement with minimal manual intervention.
 
-This long-term goal is grounded in [Product Vision](../design-governance/product-vision.md), not added as a separate late-stage idea.
+This long-term goal is grounded in [Product Vision](../../design-governance/product-vision.md), not added as a separate late-stage idea.
 
 ## Core Value
 
@@ -56,7 +56,7 @@ Veil focuses on five things:
 
 ## Next Reading
 
-- [Product](../design-governance/README.md)
-- [System Model](../technical-design/system-model/README.md)
-- [Architecture](../technical-design/architecture/README.md)
-- [Modules](../technical-design/modules/README.md)
+- [Product](../../design-governance/README.md)
+- [System Model](../../technical-design/system-model/README.md)
+- [Architecture](../../technical-design/architecture/README.md)
+- [Modules](../../technical-design/modules/README.md)

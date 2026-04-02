@@ -105,7 +105,7 @@ Relay publishes Provider availability through:
 - pricing version or offer references in request metadata bind routing-time quotes to reproducible settlement evidence.
 - witness records plus `dedupe_key` provide auditable market outcomes while preventing replayed accounting.
 
-For the Relay market-role boundary, see [Relay Module](../technical-design/modules/relay/README.md).
+For the Relay market-role boundary, see [Relay Module](../modules/relay/README.md).
 
 ## Error Semantics
 

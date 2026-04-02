@@ -11,7 +11,7 @@ Everything in this section is roadmap scope unless another section explicitly ma
 Each phase should leave the system more operable and more verifiable than before. New capability should not outrun protocol clarity, security boundaries, or runtime visibility.
 
 Use [Execution Rules](./execution-rules.md) as the hard dependency and phase-gate reference when turning this roadmap into implementation tasks.
-Use [Product Vision](../design-governance/product-vision.md) as the product constraint source when deciding what must remain on the main path.
+Use [Product Vision](../../design-governance/product-vision.md) as the product constraint source when deciding what must remain on the main path.
 
 ## North Star
 

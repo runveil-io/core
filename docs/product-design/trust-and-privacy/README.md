@@ -70,6 +70,6 @@ Split visibility and settlement evidence are complementary:
 ## Next Reading
 
 - [Accountless, Not Anonymous](./accountless-not-anonymous.md)
-- [System Model](../technical-design/system-model/README.md)
-- [Protocol](../technical-design/protocol/README.md)
-- [Governance and Economics](../product-design/governance-and-economics/README.md)
+- [System Model](../../technical-design/system-model/README.md)
+- [Protocol](../../technical-design/protocol/README.md)
+- [Governance and Economics](../governance-and-economics/README.md)

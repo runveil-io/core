@@ -102,5 +102,5 @@ Avoid:
 ## Next Reading
 
 - [Trust and Privacy](./README.md)
-- [System Model](../technical-design/system-model/README.md)
-- [Protocol](../technical-design/protocol/README.md)
+- [System Model](../../technical-design/system-model/README.md)
+- [Protocol](../../technical-design/protocol/README.md)

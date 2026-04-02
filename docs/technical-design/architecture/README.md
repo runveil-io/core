@@ -4,8 +4,8 @@
 
 This section explains the runtime topology of Veil and the ownership boundaries between major runtime planes.
 
-Architecture simplification should be checked against [Product Vision](../design-governance/product-vision.md) so the project does not simplify away its market, settlement, or automation goals.
-For a module-to-vision mapping, see [traceability-matrix.md](./traceability-matrix.md).
+Architecture simplification should be checked against [Product Vision](../../design-governance/product-vision.md) so the project does not simplify away its market, settlement, or automation goals.
+For a module-to-vision mapping, see [traceability-matrix.md](../../design-governance/traceability-matrix.md).
 
 ## Read This Section If
 
