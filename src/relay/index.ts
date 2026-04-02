@@ -239,7 +239,7 @@ export async function startRelay(options: RelayOptions): Promise<{ close(): Prom
 
     // Find target provider
     const provider = providers.get(payload.outer.provider_id);
-    if (!provider || provider.conn.readyState !== 'open') {
+    if (!provider || provider.conn.readyState !== 'connected') {
       conn.send({
         type: 'error',
         request_id: requestId,

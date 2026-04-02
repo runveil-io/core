@@ -12,11 +12,13 @@ import {
   MAX_MESSAGE_SIZE,
 } from '../config/bootstrap.js';
 
+export type ConnectionState = 'connecting' | 'connected' | 'disconnecting' | 'disconnected' | 'reconnecting';
+
 export interface Connection {
   ws: WebSocket;
   send(msg: WsMessage): void;
   close(): void;
-  readonly readyState: 'connecting' | 'open' | 'closing' | 'closed';
+  readonly readyState: ConnectionState;
 }
 
 export interface ConnectionOptions {
@@ -26,13 +28,16 @@ export interface ConnectionOptions {
   onError: (err: Error) => void;
   reconnect?: boolean;
   pingIntervalMs?: number;
+  maxReconnectAttempts?: number;
+  onStateChange?: (state: ConnectionState) => void;
+  onFailed?: () => void;
 }
 
-const WS_STATE_MAP: Record<number, Connection['readyState']> = {
+const INBOUND_MAP: Record<number, ConnectionState> = {
   [WebSocket.CONNECTING]: 'connecting',
-  [WebSocket.OPEN]: 'open',
-  [WebSocket.CLOSING]: 'closing',
-  [WebSocket.CLOSED]: 'closed',
+  [WebSocket.OPEN]: 'connected',
+  [WebSocket.CLOSING]: 'disconnecting',
+  [WebSocket.CLOSED]: 'disconnected',
 };
 
 function wrapConnection(ws: WebSocket): Connection {
@@ -47,18 +52,27 @@ function wrapConnection(ws: WebSocket): Connection {
       ws.close();
     },
     get readyState(): Connection['readyState'] {
-      return WS_STATE_MAP[ws.readyState] ?? 'closed';
+      return INBOUND_MAP[ws.readyState] ?? 'disconnected';
     },
   };
 }
 
 export function connect(options: ConnectionOptions): Promise<Connection> {
-  const { url, onMessage, onClose, onError, reconnect = true, pingIntervalMs = PING_INTERVAL_MS } = options;
+  const { url, onMessage, onClose, onError, reconnect = true, pingIntervalMs = PING_INTERVAL_MS, maxReconnectAttempts = 10, onStateChange, onFailed } = options;
   let pingInterval: ReturnType<typeof setInterval> | null = null;
   let pongTimeout: ReturnType<typeof setTimeout> | null = null;
   let reconnectAttempt = 0;
   let intentionallyClosed = false;
   let isFirstConnect = true;
+
+  let state: ConnectionState = 'disconnected';
+
+  function setState(newState: ConnectionState) {
+    if (state !== newState) {
+      state = newState;
+      onStateChange?.(state);
+    }
+  }
 
   // Shared connection object — ws is swapped on reconnect
   const conn: Connection = {
@@ -70,11 +84,13 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
     },
     close(): void {
       intentionallyClosed = true;
+      setState('disconnecting');
       cleanup();
       this.ws?.close();
+      setState('disconnected');
     },
     get readyState(): Connection['readyState'] {
-      return WS_STATE_MAP[this.ws?.readyState ?? WebSocket.CLOSED] ?? 'closed';
+      return state;
     },
   };
 
@@ -101,12 +117,14 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
   }
 
   function doConnect(): Promise<void> {
+    setState(isFirstConnect ? 'connecting' : 'reconnecting');
     return new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(url, { maxPayload: MAX_MESSAGE_SIZE });
       conn.ws = ws;
 
       ws.on('open', () => {
         reconnectAttempt = 0;
+        setState('connected');
         setupPing(ws);
         resolve();
       });
@@ -123,15 +141,21 @@ export function connect(options: ConnectionOptions): Promise<Connection> {
       ws.on('close', (code, reason) => {
         cleanup();
         onClose(code, reason.toString());
-        if (reconnect && !intentionallyClosed) {
-          const delay = Math.min(
-            WS_RECONNECT_BASE_MS * Math.pow(2, reconnectAttempt),
-            WS_RECONNECT_MAX_MS,
-          );
-          reconnectAttempt++;
-          setTimeout(() => {
-            doConnect().catch(() => { /* reconnect failures handled by onClose */ });
-          }, delay);
+        if (!intentionallyClosed) {
+          setState('disconnected');
+          if (reconnect) {
+            if (reconnectAttempt >= maxReconnectAttempts) {
+              onFailed?.();
+            } else {
+              const baseDelay = WS_RECONNECT_BASE_MS * Math.pow(2, reconnectAttempt);
+              const jitter = Math.random() * 1000;
+              const delay = Math.min(baseDelay + jitter, WS_RECONNECT_MAX_MS);
+              reconnectAttempt++;
+              setTimeout(() => {
+                doConnect().catch(() => { /* reconnect failures handled by onClose */ });
+              }, delay);
+            }
+          }
         }
       });
 

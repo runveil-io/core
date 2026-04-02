@@ -291,7 +291,7 @@ export async function startGateway(options: GatewayOptions): Promise<{
       return errorResponse(`Model '${body.model}' not available`, 'invalid_request_error', 'model_not_found', 404);
     }
 
-    if (!relayConn || relayConn.readyState !== 'open') {
+    if (!relayConn || relayConn.readyState !== 'connected') {
       return errorResponse('Relay not connected', 'api_error', null, 502);
     }
 

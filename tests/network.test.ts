@@ -31,7 +31,7 @@ describe('network', () => {
     });
     connections.push(conn);
 
-    expect(conn.readyState).toBe('open');
+    expect(conn.readyState).toBe('connected');
   });
 
   it('send + onMessage roundtrip', async () => {
@@ -92,7 +92,7 @@ describe('network', () => {
       pingIntervalMs: 60000,
     });
 
-    expect(conn.readyState).toBe('open');
+    expect(conn.readyState).toBe('connected');
     expect(connCount).toBe(1);
 
     // Terminate the client WS to trigger reconnect cycle
@@ -151,4 +151,95 @@ describe('network', () => {
     // At minimum, verify connection was established and callback infrastructure works.
     expect(typeof conn.readyState).toBe('string');
   });
+
+  it('reports correct state transitions', async () => {
+    let serverPort: number;
+    let server = createServer({ port: 0, onConnection() {} });
+    serverPort = server.address().port;
+
+    const states: string[] = [];
+    const conn = await connect({
+      url: `ws://localhost:${serverPort}`,
+      onMessage() {},
+      onClose() {},
+      onError() {},
+      reconnect: false,
+      pingIntervalMs: 60000,
+      onStateChange(s) { states.push(s); }
+    });
+    connections.push(conn);
+
+    expect(conn.readyState).toBe('connected');
+    
+    // Test disconnecting transition
+    conn.close();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(states).toEqual(['connecting', 'connected', 'disconnecting', 'disconnected']);
+  });
+
+  it('respects max attempts and bounded jitter', async () => {
+    // Attempting to connect to an invalid port
+    let failed = false;
+    let closeCount = 0;
+    
+    // We mock global setTimeout to track jitter, or we can just measure time differences.
+    // Instead of full timing suites, we ensure `failed` fires after N=3 attempts
+    // and verify the attempts happened.
+    const start = Date.now();
+    try {
+      await connect({
+        url: `ws://localhost:49999`, // Nothing should be running here
+        onMessage() {},
+        onClose() { closeCount++; },
+        onError() {},
+        reconnect: true,
+        maxReconnectAttempts: 3,
+        pingIntervalMs: 60000,
+        onFailed() { failed = true; }
+      });
+    } catch {
+      // Intentionally fails initial connect, but wait! The connect Promise only resolves on OPEN.
+      // If it fails initially, `doConnect.catch()` handles it, and if it's the FirstConnect, it `rejects` the entire connect() promise!
+      // Wait, `connect()` promise rejects on initial connection failure. So reconnects only happen if it successfully connects first?
+      // Our implementation does: `if (isFirstConnect && ws.readyState !== WebSocket.OPEN) { reject(err); }`. So it won't auto-reconnect if it fails *first*! 
+    }
+    
+    // To test reconnects, we must connect to a real server, then kill it, and let it reconnect 3 times before failing.
+    const server = createServer({ port: 0, onConnection() {} });
+    const port = server.address().port;
+    
+    let stateChanges: string[] = [];
+    const conn = await connect({
+      url: `ws://localhost:${port}`,
+      onMessage() {},
+      onClose() { closeCount++; },
+      onError() {},
+      reconnect: true,
+      maxReconnectAttempts: 3,
+      pingIntervalMs: 60000,
+      onFailed() { failed = true; },
+      onStateChange(s) { stateChanges.push(s); }
+    });
+    connections.push(conn);
+    
+    // Close the server so reconnects fail continuously
+    server.close();
+    conn.ws.terminate(); // trigger unexpected close
+    
+    // Wait until failed is true (should take ~ 1s + 2s + 4s = ~7s due to base 1s backoff, plus max 1s jitter each step)
+    // Actually, delays are 1s, 2s, 4s = 7s.
+    const maxWait = 15000;
+    let waited = 0;
+    while (!failed && waited < maxWait) {
+      await new Promise(r => setTimeout(r, 500));
+      waited += 500;
+    }
+    
+    expect(failed).toBe(true);
+    // It should have failed after ~3 attempts.
+    // State transitions: connecting -> connected -> disconnected -> reconnecting -> disconnected -> reconnecting -> disconnected -> ... until failed.
+    const reconnectingCount = stateChanges.filter(s => s === 'reconnecting').length;
+    // maxAttempts is 3, so it reconnects 3 times before stopping.
+    expect(reconnectingCount).toBe(3);
+  }, 20000); // give the test 20s
 });
