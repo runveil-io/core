@@ -105,7 +105,7 @@ Relay 通过以下消息发布 Provider 可用性：
 - 请求元数据中的定价版本或报价引用，把路由阶段报价绑定到可重放的结算证据链。
 - 见证记录结合 `dedupe_key` 在保证可审计性的同时，降低重放入账风险。
 
-关于 Relay 的市场角色边界，请参考 [Relay 模块](../technical-design/modules/relay/README.zh.md)。
+关于 Relay 的市场角色边界，请参考 [Relay 模块](../modules/relay/README.zh.md)。
 
 ## 错误语义
 

@@ -70,6 +70,6 @@ Veil 旨在提供无账户接入和隐私保护式路由，但并不承诺完美
 ## 下一步阅读
 
 - [无账户接入，不等于匿名](./accountless-not-anonymous.zh.md)
-- [系统模型](../technical-design/system-model/README.zh.md)
-- [协议设计](../technical-design/protocol/README.zh.md)
-- [治理与经济边界](../product-design/governance-and-economics/README.zh.md)
+- [系统模型](../../technical-design/system-model/README.zh.md)
+- [协议设计](../../technical-design/protocol/README.zh.md)
+- [治理与经济边界](../../product-design/governance-and-economics/README.zh.md)

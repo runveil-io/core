@@ -102,5 +102,5 @@ Veil 现在正式文档写的是：
 ## 下一步阅读
 
 - [信任与隐私](./README.zh.md)
-- [系统模型](../technical-design/system-model/README.zh.md)
-- [协议设计](../technical-design/protocol/README.zh.md)
+- [系统模型](../../technical-design/system-model/README.zh.md)
+- [协议设计](../../technical-design/protocol/README.zh.md)

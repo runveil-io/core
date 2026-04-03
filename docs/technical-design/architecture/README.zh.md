@@ -4,8 +4,8 @@
 
 本节说明 Veil 的运行时拓扑，以及各主要运行平面的职责归属边界。
 
-任何架构简化都应对照 [产品愿景](../design-governance/product-vision.zh.md) 审核，避免在简化过程中把市场、结算或自动化目标一并删掉。
-模块到愿景的映射请参考 [traceability-matrix.zh.md](./traceability-matrix.zh.md)。
+任何架构简化都应对照 [产品愿景](../../design-governance/product-vision.zh.md) 审核，避免在简化过程中把市场、结算或自动化目标一并删掉。
+模块到愿景的映射请参考 [traceability-matrix.zh.md](../../design-governance/traceability-matrix.zh.md)。
 
 ## 适用场景
 
