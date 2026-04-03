@@ -213,3 +213,64 @@ Creates a signed witness with daily-salted consumer hash (`sha256(pubkey + YYYY-
 - ⚠️ Consumer privacy: daily-salted hash only (no per-request rotation) [PARTIAL]
 - ❌ Witness export to on-chain format [DESIGN ONLY]
 - ❌ Multi-relay witness cross-verification [DESIGN ONLY]
+
+---
+
+## Design Specifications for Unimplemented Items
+
+### Witness Export to On-Chain Format [DESIGN SPEC · Phase 5]
+
+```ts
+interface OnChainWitness {
+  requestId: string;
+  consumerHash: string;           // daily-salted hash (privacy-preserving)
+  providerPubkey: string;
+  relayPubkey: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  pricingVersion: string;
+  relaySignature: string;
+  evidenceHash: string;           // sha256 of signable payload
+}
+
+interface WitnessExportBatch {
+  batchId: string;
+  witnesses: OnChainWitness[];
+  merkleRoot: string;             // root of witness evidence tree
+  relaySignature: string;         // batch-level signature
+  exportedAt: number;
+}
+
+// Export flow:
+// 1. WitnessStore.export(since, until) → WitnessRecord[]
+// 2. Map each to OnChainWitness (strip prompt content, keep evidence)
+// 3. Build Merkle tree of evidence hashes
+// 4. Sign batch with relay key
+// 5. Output: JSON batch file or contract-ready calldata
+// Storage: never export prompt plaintext; only metadata + evidence hashes
+```
+
+### Multi-Relay Witness Cross-Verification [DESIGN SPEC · Phase 5]
+
+```ts
+interface CrossVerifyRequest {
+  requestId: string;
+  evidenceHash: string;
+  relayPubkey: string;
+  relaySignature: string;
+}
+
+// Protocol:
+// 1. After request completion, relay publishes evidence hash to peer relays
+// 2. Peer relays that handled the same request compare evidence hashes
+// 3. Match → both sign a cross-verify attestation
+// 4. Mismatch → flag for manual review, do not auto-settle
+// 5. Cross-verified witnesses get higher settlement confidence score
+//
+// Constraints:
+// - Cross-verify is optional; single-relay witness is still valid for settlement
+// - Peer relay discovery via bootstrap (relay-to-relay gossip endpoint)
+// - Evidence hashes only — no prompt content exchanged between relays
+// - Rate limit: max 100 cross-verify requests per minute per relay pair
+```

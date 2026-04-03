@@ -200,3 +200,57 @@ fromHex(hex: string): Uint8Array
 - ⚠️ KDF cost parameter configurable but defaults to test value (N=2^14) [PARTIAL]
 - ❌ Hardware key / HSM support [DESIGN ONLY]
 - ❌ Key rotation without identity change [DESIGN ONLY]
+
+---
+
+## Design Specifications for Unimplemented Items
+
+### Hardware Key / HSM Support [DESIGN SPEC · Phase 4]
+
+```ts
+type KeyBackend = 'file' | 'hsm' | 'yubikey' | 'tpm';
+
+interface HardwareKeyConfig {
+  backend: KeyBackend;
+  slotId?: number;                 // HSM/YubiKey slot
+  pin?: string;                    // prompted at runtime, never persisted
+  pkcs11LibPath?: string;          // for generic HSM via PKCS#11
+}
+
+interface WalletProvider {
+  getPublicKey(): Promise<string>;
+  sign(payload: Uint8Array): Promise<Uint8Array>;  // delegates to backend
+  // Private key never leaves HSM boundary
+}
+
+// Rules:
+// - File backend: existing Ed25519 keypair in ~/.veil/wallet.json
+// - HSM backend: key generated inside HSM, only pubkey exported
+// - Sign operations always async (HSM may require PIN/touch)
+// - Wallet interface unchanged for consumers (provider-engine, relay, etc.)
+// - CLI: veil wallet init --backend yubikey --slot 1
+```
+
+### Key Rotation Without Identity Change [DESIGN SPEC · Phase 4]
+
+```ts
+interface KeyRotation {
+  oldPubkey: string;
+  newPubkey: string;
+  rotationProof: string;           // signed by old key: "rotate:{oldPub}:{newPub}:{timestamp}"
+  timestamp: number;
+}
+
+// Flow:
+// 1. Generate new keypair (same backend)
+// 2. Sign rotation proof with OLD key
+// 3. Broadcast KeyRotation to connected relays
+// 4. Relay verifies proof, updates provider/consumer pubkey mapping
+// 5. Old key kept for verification of existing witnesses (90-day retention)
+// 6. New key used for all new signatures
+//
+// Identity continuity: pubkey changes, but node identity preserved via
+// rotation chain (each rotation references previous pubkey)
+// CLI: veil wallet rotate [--force]
+// Requires re-registration with relays (automatic in autopilot mode)
+```

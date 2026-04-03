@@ -194,3 +194,43 @@ Starts HTTP server (Hono + @hono/node-server) and connects to relay.
 - ⚠️ Streaming budget tracking uses heuristic (~1 token per 4 chars) [PARTIAL]
 - ❌ Multi-relay simultaneous connections [DESIGN ONLY]
 - ❌ Request-level Provider preference or pinning [DESIGN ONLY]
+
+---
+
+## Design Specifications for Unimplemented Items
+
+### Multi-Relay Simultaneous Connections [DESIGN SPEC · Phase 2]
+
+```ts
+interface MultiRelayConfig {
+  relayUrls: string[];             // 2+ relay endpoints
+  strategy: 'failover' | 'round-robin' | 'latency-preferred';
+  maxConcurrentRelays: number;     // default 2
+  failoverTimeoutMs: number;       // switch to next relay after this (default 5000)
+}
+
+// Behavior:
+// - Gateway maintains WebSocket connections to multiple relays simultaneously
+// - 'failover': use primary, switch on disconnect/timeout
+// - 'round-robin': distribute requests across relays
+// - 'latency-preferred': route to lowest recent RTT relay
+// - Relay health tracked per-connection (last success, error count, avg latency)
+// - On all relays down: queue requests up to 10s, then 503
+// - Relay list refreshed from bootstrap on configurable interval (default 5min)
+```
+
+### Request-Level Provider Preference [DESIGN SPEC · Phase 4]
+
+```ts
+interface ProviderPreference {
+  preferredProviders?: string[];   // provider pubkeys, ordered by preference
+  excludeProviders?: string[];     // provider pubkeys to avoid
+  maxLatencyMs?: number;           // reject providers with higher avg latency
+  modelPin?: string;               // force specific model variant
+}
+
+// Passed via x-veil-provider-preference header (JSON, base64-encoded)
+// Relay honors preference on best-effort basis (not guaranteed)
+// If preferred provider unavailable, falls back to normal routing
+// Provider preference never leaks to other consumers or providers
+```

@@ -226,3 +226,49 @@ deserializeWitness(data: string): Witness
 - ⚠️ Metering witness uses HMAC, relay witness uses Ed25519 — two separate systems [PARTIAL]
 - ❌ Deterministic pricing snapshots with versioning [DESIGN ONLY]
 - ❌ Quote-unit / settlement-asset separation [DESIGN ONLY]
+
+---
+
+## Design Specifications for Unimplemented Items
+
+### Deterministic Pricing Snapshots with Versioning [DESIGN SPEC · Phase 4/5]
+
+```ts
+// Extends existing PricingSnapshot in metering module
+interface VersionedPricingSnapshot extends PricingSnapshot {
+  version: string;               // sha256(model + inputPerM + outputPerM + bucketId)
+  bucketId: string;              // floor(timestamp / 300000) — 5-min bucket
+  cacheReadPerM?: number;
+  createdAt: number;
+}
+
+// Integration with existing calculateCost():
+// - calculateCostByModel() currently looks up DEFAULT_PRICE_TABLE
+// - Future: also writes a VersionedPricingSnapshot on each price table change
+// - WitnessStore.record() captures snapshot.version in witness record
+// - Settlement resolves pricing by version, not by current table
+//
+// Migration: existing witnesses without pricingVersion get version='legacy-v0'
+```
+
+### Quote-Unit / Settlement-Asset Separation [DESIGN SPEC · Phase 5]
+
+```ts
+// Current state: all amounts are in 'usd_estimate' quote units
+// Future: amounts stay in quote units through metering/witness pipeline
+// Conversion to settlement asset happens ONLY in settlement-payout module
+
+// Changes to WitnessRecord:
+interface WitnessRecordV2 extends WitnessRecord {
+  quoteUnit: QuoteUnit;            // explicit on every record (not assumed)
+  pricingVersion: string;          // links to VersionedPricingSnapshot
+  // settlementAsset is NOT stored here — settlement module resolves it
+}
+
+// Rules:
+// - Metering pipeline only speaks quote units
+// - No settlement-asset references in metering or witness code
+// - Budget tracker compares in quote units
+// - Cost breakdown reports quote unit explicitly
+// - Settlement-payout module owns the quote→asset conversion
+```

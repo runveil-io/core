@@ -198,3 +198,74 @@ getMetrics(): {
 - ❌ Capacity publication to market [DESIGN ONLY]
 - ❌ Credential rotation without restart [DESIGN ONLY]
 - ❌ Multi-provider backend (only Anthropic) [DESIGN ONLY]
+
+---
+
+## Design Specifications for Unimplemented Items
+
+### Capacity Publication to Market [DESIGN SPEC · Phase 4]
+
+```ts
+interface CapacityPublishMessage {
+  type: 'capacity_publish';
+  providerPubkey: string;
+  offers: CapacityOffer[];         // from pricing-risk-policy
+  signature: string;               // signed by provider wallet
+  timestamp: number;
+}
+
+// Flow:
+// 1. Autopilot calls evaluateOffer() → OfferDecision
+// 2. If publish=true, provider sends CapacityPublishMessage to connected relay(s)
+// 3. Relay stores offers in routing table (used for consumer provider selection)
+// 4. Offers expire at validUntil; provider must re-publish to stay listed
+// 5. Withdraw: send CapacityPublishMessage with empty offers[]
+// Protocol message sent over existing provider→relay WebSocket
+```
+
+### Multi-Provider Backend [DESIGN SPEC · Phase 3]
+
+```ts
+type BackendType = 'anthropic' | 'openai' | 'google' | 'local-ollama';
+
+interface BackendConfig {
+  type: BackendType;
+  models: string[];                // models this backend serves
+  baseUrl?: string;                // override endpoint (for local/custom)
+  credentialRef: string;           // key name in credential store
+  maxConcurrency: number;
+  priority: number;                // lower = preferred for overlapping models
+}
+
+interface ProviderBackendRegistry {
+  backends: BackendConfig[];
+  resolveBackend(model: string): BackendConfig | null;  // best match by priority
+}
+
+// Rules:
+// - Each backend has independent credential + concurrency tracking
+// - Model routing: first match by priority; no model = reject request
+// - Health tracked per-backend (not global)
+// - Backend addition/removal requires restart (Phase 3)
+// - Hot-reload of backend list planned for Phase 6
+```
+
+### Credential Rotation Without Restart [DESIGN SPEC · Phase 4]
+
+```ts
+interface CredentialStore {
+  get(ref: string): string;        // returns current active credential
+  rotate(ref: string, newValue: string): void;  // atomic swap
+  onRotate(ref: string, cb: () => void): void;  // notify backends
+}
+
+// Flow:
+// 1. Operator runs: veil provider rotate-key --backend anthropic
+// 2. New key written to credential store (encrypted at rest)
+// 3. Store emits onRotate event
+// 4. Backend picks up new credential on next request (no restart)
+// 5. Old credential kept for 60s (drain in-flight requests)
+// 6. Rotation logged with timestamp (no key material in logs)
+//
+// Storage: ~/.veil/credentials.enc (AES-256-GCM, key derived from wallet)
+```

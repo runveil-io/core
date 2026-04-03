@@ -186,3 +186,82 @@ class RbobLedger {
 - ❌ On-chain token claim submission [DESIGN ONLY]
 - ❌ Multi-admin signature support [DESIGN ONLY]
 - ❌ Contributor identity linking to wallet pubkeys [DESIGN ONLY]
+
+---
+
+## Design Specifications for Unimplemented Items
+
+### On-Chain Token Claim Submission [DESIGN SPEC · Phase 5]
+
+```ts
+interface ClaimRequest {
+  contributorId: string;
+  walletAddress: string;           // EVM address for token receipt
+  claimAmount: number;             // RBOB points to claim
+  balanceProof: string;            // signed: "claim:{id}:{amount}:{nonce}"
+  nonce: number;                   // monotonic, prevents replay
+}
+
+interface ClaimReceipt {
+  claimId: string;
+  txHash?: string;                 // on-chain tx hash (after submission)
+  status: 'pending' | 'submitted' | 'confirmed' | 'failed';
+  submittedAt?: number;
+}
+
+// Flow:
+// 1. Contributor links wallet (see identity linking below)
+// 2. CLI: veil rbob claim --amount 100
+// 3. System verifies balance >= amount, generates signed ClaimRequest
+// 4. Claim exported as JSON (for manual submission) or submitted via RPC
+// 5. On-chain contract verifies admin signature + nonce
+// 6. Points deducted from ledger balance on confirmation
+//
+// Constraints:
+// - Minimum claim: 10 RBOB points
+// - Max 1 claim per contributor per 24h
+// - Failed claims: nonce not incremented, can retry
+// - RBOB ledger and inference settlement are separate ledgers (never mixed)
+```
+
+### Multi-Admin Signature Support [DESIGN SPEC · Phase 5]
+
+```ts
+interface AdminGrant {
+  grantId: string;
+  contributor: string;
+  points: number;
+  reason: string;
+  signatures: { adminId: string; signature: string }[];
+  requiredSignatures: number;      // e.g. 2-of-3
+  status: 'pending' | 'approved' | 'rejected';
+}
+
+// Rules:
+// - Grant requires N-of-M admin signatures (configurable, default 1-of-1)
+// - Each admin signs: "grant:{grantId}:{contributor}:{points}:{reason}"
+// - Grant applied to ledger only when requiredSignatures met
+// - Admin list stored in rbob-config.json (pubkeys)
+// - Admin add/remove requires existing admin majority signature
+// - Audit: all grants with partial signatures visible in export
+```
+
+### Contributor Identity Linking to Wallet Pubkeys [DESIGN SPEC · Phase 5]
+
+```ts
+interface IdentityLink {
+  contributorId: string;           // GitHub username or internal ID
+  walletPubkey: string;            // Ed25519 pubkey from wallet-identity
+  evmAddress?: string;             // for on-chain claims
+  linkProof: string;               // signed by wallet: "link:{contributorId}:{pubkey}"
+  linkedAt: number;
+}
+
+// Flow:
+// 1. CLI: veil rbob link --contributor github:username
+// 2. Wallet signs link proof
+// 3. Stored in rbob.db identity_links table
+// 4. Required before on-chain claims (must know where to send tokens)
+// 5. One contributor can link multiple wallets (e.g. rotation)
+// 6. Unlinking: requires wallet signature + admin approval
+```

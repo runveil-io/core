@@ -172,3 +172,66 @@ Creates a WebSocket server. Returns handle with port info.
 - ❌ TLS certificate validation configuration [DESIGN ONLY]
 - ❌ Connection multiplexing [DESIGN ONLY]
 - ❌ Binary frame support (currently JSON only) [DESIGN ONLY]
+
+---
+
+## Design Specifications for Unimplemented Items
+
+### TLS Certificate Validation Configuration [DESIGN SPEC · Phase 3]
+
+```ts
+interface TlsConfig {
+  mode: 'strict' | 'permissive' | 'skip-verify';  // default 'strict'
+  caCertPath?: string;             // custom CA bundle
+  clientCertPath?: string;         // mutual TLS (future)
+  clientKeyPath?: string;
+  minVersion: 'TLSv1.2' | 'TLSv1.3';  // default TLSv1.2
+}
+
+// Rules:
+// - 'strict': verify server cert against system + custom CA
+// - 'permissive': warn on invalid cert, still connect (dev only)
+// - 'skip-verify': no verification (testing only, logged as WARNING)
+// - Production deployments must use 'strict'
+// - mTLS planned for relay-to-relay and provider-to-relay channels (Phase 5)
+// - Config via: ~/.veil/tls.json or --tls-mode CLI flag
+```
+
+### Connection Multiplexing [DESIGN SPEC · Phase 3]
+
+```ts
+interface MultiplexConfig {
+  maxStreamsPerConnection: number;  // default 100
+  idleTimeoutMs: number;           // close idle connection after (default 300_000)
+  maxConnections: number;          // per remote endpoint (default 3)
+}
+
+// Current: one WebSocket per relay connection, messages serialized
+// Future: multiplex multiple request streams over single WS connection
+// Protocol: each message tagged with streamId (uint32)
+// Benefits: reduce connection overhead, share TLS handshake cost
+// Backpressure: per-stream flow control via credits (initial=10 frames)
+```
+
+### Binary Frame Support [DESIGN SPEC · Phase 4]
+
+```ts
+enum FrameType {
+  JSON_REQUEST  = 0x01,
+  JSON_RESPONSE = 0x02,
+  BINARY_CHUNK  = 0x03,  // for streaming responses
+  CONTROL       = 0x04,  // ping/pong/close
+}
+
+interface BinaryFrame {
+  type: FrameType;       // 1 byte
+  streamId: number;      // 4 bytes (uint32)
+  length: number;        // 4 bytes (uint32)
+  payload: Uint8Array;   // variable length
+}
+
+// Negotiation: client sends Upgrade header with x-veil-binary-frames=1
+// Fallback: if server doesn't support, stays JSON-only (backward compatible)
+// JSON messages still valid — binary is opt-in per connection
+// Benefit: ~30% bandwidth reduction for streaming responses
+```

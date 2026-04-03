@@ -195,3 +195,60 @@ computeRelayScore(relay: RelayInfo, measuredLatencyMs: number | null): RelayScor
 - ⚠️ Reputation score is static in DB, not dynamically computed from witness data [PARTIAL]
 - ❌ Relay banning/unbanning workflow [DESIGN ONLY]
 - ❌ Health check probes from bootstrap to relays [DESIGN ONLY]
+
+---
+
+## Design Specifications for Unimplemented Items
+
+### Relay Banning/Unbanning Workflow [DESIGN SPEC · Phase 3]
+
+```ts
+interface RelayBanRecord {
+  relayPubkey: string;
+  reason: 'unresponsive' | 'witness_mismatch' | 'protocol_violation' | 'operator_manual';
+  bannedAt: number;
+  expiresAt?: number;              // null = permanent until manual unban
+  bannedBy: 'auto' | 'operator';
+}
+
+// Auto-ban triggers:
+// 1. Relay fails 5 consecutive health probes → ban 1h
+// 2. Relay returns invalid witness signatures → ban 24h
+// 3. Relay violates protocol (e.g. version mismatch) → ban until fixed
+//
+// Unban:
+// - Time-based bans auto-expire
+// - Operator: veil bootstrap unban <relay-pubkey>
+// - On unban, relay re-enters discovery pool but at lowest priority
+//
+// Storage: ban records in bootstrap.db alongside relay registry
+// Consumer/provider discovery: banned relays filtered from results
+```
+
+### Health Check Probes [DESIGN SPEC · Phase 3]
+
+```ts
+interface HealthProbeConfig {
+  intervalMs: number;              // default 60_000 (1 min)
+  timeoutMs: number;               // default 5_000
+  consecutiveFailsForBan: number;  // default 5
+  probeEndpoint: string;           // GET /v1/health on relay
+}
+
+interface RelayHealthStatus {
+  relayPubkey: string;
+  lastProbeAt: number;
+  lastSuccessAt: number;
+  consecutiveFails: number;
+  avgLatencyMs: number;            // rolling 10-probe average
+  status: 'healthy' | 'degraded' | 'unreachable';
+}
+
+// Probe flow:
+// 1. Bootstrap sends GET /v1/health to each registered relay every intervalMs
+// 2. Relay responds with { status: 'ok', uptime, connectedProviders }
+// 3. Bootstrap updates RelayHealthStatus
+// 4. 'degraded': latency > 2x average → lower priority in discovery results
+// 5. 'unreachable': consecutiveFails >= threshold → trigger auto-ban
+// 6. Health data exposed: GET /v1/relays includes health scores
+```
