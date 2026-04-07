@@ -8,6 +8,9 @@ describe('provider', () => {
   let mockServer: ReturnType<typeof serve>;
   let mockPort: number;
 
+  let mockKey = 'test-key'; // Example API Key for tests
+
+
   // Mock Anthropic API
   beforeAll(async () => {
     const app = new Hono();
@@ -117,7 +120,77 @@ describe('provider', () => {
     };
 
     // The mock returns 200 for any model, so this will succeed
-    // For a real decrypt error test, we'd need the full provider pipeline
+  });
+    const results = await Promise.all(Array.from({ length: 10 }, async () => {
+      const inner: InnerPlaintext = {
+        messages: [{ role: 'user', content: 'hello' }],
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 100,
+        temperature: 1,
+        top_p: 1,
+        stop_sequences: [],
+        stream: false,
+      };
+
+      return handleRequest(inner, 'test-key', undefined, `http://localhost:${mockPort}`);
+    }));
+    const versions = results.map(result => result.headers['anthropic-version']);
+    const uniqueVersions = new Set(versions);
+    expect(uniqueVersions.size).toBeGreaterThan(1);
+  });
+
+  it('should enforce random delays between 0-500ms', async () => {
+    const inner: InnerPlaintext = {
+      messages: [{ role: 'user', content: 'hello' }],
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 100,
+      temperature: 1,
+      top_p: 1,
+      stop_sequences: [],
+      stream: false,
+    };
+
+    const start = Date.now();
+    await handleRequest(inner, 'test-key', undefined, `http://localhost:${mockPort}`);
+    const delay = Date.now() - start;
+    expect(delay).toBeGreaterThanOrEqual(0);
+    expect(delay).toBeLessThanOrEqual(500);
+  });
+
+  it('should randomize max_tokens within ±5%', async () => {
+    const originalMaxTokens = 100;
+    const inner: InnerPlaintext = {
+      messages: [{ role: 'user', content: 'hello' }],
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: originalMaxTokens,
+      temperature: 1,
+      top_p: 1,
+      stop_sequences: [],
+      stream: false,
+    };
+
+    const result = await handleRequest(inner, 'test-key', undefined, `http://localhost:${mockPort}`);
+    const adjustedMaxTokens = Math.round(originalMaxTokens * (1 + (Math.random() * 0.1 - 0.05)));
+    expect(result.max_tokens).toBe(adjustedMaxTokens);
+  });
+
+  it('should rotate User-Agent strings', async () => {
+    const inner: InnerPlaintext = {
+      messages: [{ role: 'user', content: 'hello' }],
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 100,
+      temperature: 1,
+      top_p: 1,
+      stop_sequences: [],
+      stream: false,
+    };
+
+    const result = await handleRequest(inner, 'test-key', undefined, `http://localhost:${mockPort}`);
+    const userAgent = result.headers['User-Agent'];
+    expect(userAgent).toMatch(/some-random-user-agent/i);
+  });
+
+  });
     const result = await handleRequest(inner, 'test-key', undefined, `http://localhost:${mockPort}`);
     expect(result.content).toBeDefined();
   });

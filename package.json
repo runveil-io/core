@@ -16,6 +16,7 @@
     "better-sqlite3": "^11.0.0",
     "hono": "^4.0.0",
     "nanoid": "^5.0.0",
+    "node-fetch": "^3.3.2",
     "tweetnacl": "^1.0.3",
     "tweetnacl-util": "^0.15.1",
     "ws": "^8.18.0"
